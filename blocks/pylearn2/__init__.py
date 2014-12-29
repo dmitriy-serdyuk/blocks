@@ -51,8 +51,8 @@ class Pylearn2Model(pylearn2.models.Model):
 
         We need this wrapper to make the loaded monitor continuable
         (currently deserialized monitor is non-functional in PyLearn2).
-        For this we had to create a new monitor and initialize with the data
-        from the old one.
+        For this we had to create a new monitor and initialize with the
+        data from the old one.
 
         Parameters
         ----------
@@ -77,10 +77,9 @@ class Pylearn2Cost(pylearn2.costs.cost.Cost):
 
     Notes
     -----
-
-        The inputs of the computation graph must have names compatible with
-        names of the data sources. The is necessary in order to replace with
-        with the ones given by PyLearn2.
+    The inputs of the computation graph must have names compatible with
+    names of the data sources. The is necessary in order to replace with
+    with the ones given by PyLearn2.
 
     """
     def __init__(self, cost):
@@ -195,13 +194,13 @@ class Pylearn2LearningRule(pylearn2.training_algorithms
         for value, accumulator in zip(self.values, self.accumulators):
             value_inputs = ComputationGraph(value).dict_of_inputs()
             replace_dict = dict()
-            for name, inp in value_inputs.items():
+            for name, input_ in value_inputs.items():
                 # See docstring to see how it works
                 grad_input = grad_inputs[unpack(
                     [n for n in grad_inputs
                      if n.endswith('[{}]'.format(name))],
                     singleton=True)]
-                replace_dict[inp] = tensor.unbroadcast(
+                replace_dict[input_] = tensor.unbroadcast(
                     grad_input, *range(grad_input.ndim))
             updates[accumulator] = (
                 accumulator + theano.clone(value, replace_dict))
@@ -215,14 +214,13 @@ class DefaultExtension(pylearn2.train_extensions.TrainExtension):
 
     The job of this extensions is to help the Pylearn2LearningRule in its
     monitoring duties. Due to impossibility of reseting the accumulators of
-    monitored values, the gradient computation function simply adds values from
-    new batches to the accumulators. At the end of each epoch the accumulator's
-    value from the previous epoch should be subtracted and the difference
-    should be divided over the number of batches to get an average for the last
-    epoch. This is done in the `on_monitor` method.
+    monitored values, the gradient computation function simply adds values
+    from new batches to the accumulators. At the end of each epoch the
+    accumulator's value from the previous epoch should be subtracted and
+    the difference should be divided over the number of batches to get an
+    average for the last epoch. This is done in the `on_monitor` method.
 
     """
-
     def setup(self, model, dataset, algoritm):
         self._last_batches_seen = model.monitor.get_batches_seen()
         self._last_values = dict()
@@ -236,8 +234,9 @@ class DefaultExtension(pylearn2.train_extensions.TrainExtension):
                 len(self._last_values)):
             for accum in learning_rule.accumulators:
                 accum.set_value(
-                    (accum.get_value() - self._last_values[accum]) /
-                    (batches_seen - self._last_batches_seen))
+                    ((accum.get_value() - self._last_values[accum]) /
+                     (batches_seen - self._last_batches_seen)).astype(
+                         theano.config.floatX))
         for accum in learning_rule.accumulators:
             self._last_values[accum] = accum.get_value()
         batches_seen -= self._last_batches_seen

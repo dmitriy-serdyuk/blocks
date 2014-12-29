@@ -1,5 +1,4 @@
 """Annonated computation graph management."""
-
 import logging
 
 import theano
@@ -16,17 +15,17 @@ logger = logging.getLogger(__name__)
 class ComputationGraph(object):
     """Encapsulates a managed Theano computation graph.
 
+    Parameters
+    ----------
+    outputs : list of Theano variables
+        The outputs of the computation graph.
+
     Attributes
     ----------
     inputs : list of Theano variables
         The inputs of the computation graph.
     outputs : list of Theano variables
         The outputs of the computations graph.
-
-    Parameters
-    ----------
-    outputs : list of Theano variables
-        The outputs of the computation graph.
 
     """
     def __init__(self, outputs):
@@ -51,9 +50,6 @@ class ComputationGraph(object):
                     self.application_calls.add(application_call)
                     for av in application_call.auxiliary_variables:
                         av.tag.application_call = current.tag.application_call
-                        # do we want to continue the recursion over
-                        # the auxiliaries?
-                        # recursion(av)
                     self.variables.update(application_call.auxiliary_variables)
                     self.updates.extend(application_call.updates)
             if current.owner:
@@ -64,9 +60,9 @@ class ComputationGraph(object):
                                      .format(owner))
                         self.updates.extend(owner.tag.updates.items())
                     self.applies.add(owner)
-                for inp in owner.inputs:
-                    if inp not in self.variables:
-                        recursion(inp)
+                for input_ in owner.inputs:
+                    if input_ not in self.variables:
+                        recursion(input_)
 
         def is_input(variable):
             return (not variable.owner

@@ -6,11 +6,11 @@ are lazy-only, i.e. can not be initialized with a single constructor call.
 """
 import copy
 
-from blocks.bricks import lazy, application, MLP, Identity, Initializeable
+from blocks.bricks import lazy, application, MLP, Identity, Initializable
 from blocks.utils import update_instance
 
 
-class Parallel(Initializeable):
+class Parallel(Initializable):
     """Apply similar transformations to several channels.
 
     Parameters
@@ -24,14 +24,17 @@ class Parallel(Initializeable):
         Dictonary of output dimensions, keys are channel names, values are
         dimensions.
     prototype : :class:`Brick`
-        A transformation prototype. A copy will be created for every channel.
-        If ``None``, a linear transformation is used.
+        A transformation prototype. A copy will be created for every
+        channel.  If ``None``, a linear transformation is used.
+
+    Notes
+    -----
+    See :class:`Initializable` for initialization parameters.
 
     """
     @lazy
     def __init__(self, channel_names, input_dims, output_dims,
-                 prototype=None, weights_init=None, biases_init=None,
-                 **kwargs):
+                 prototype=None, **kwargs):
         super(Parallel, self).__init__(**kwargs)
         update_instance(self, locals())
 
@@ -95,9 +98,9 @@ class Fork(Parallel):
         self.output_dims = self.fork_dims
         super(Fork, self)._push_allocation_config()
 
-    @application(inputs='inp')
-    def apply(self, inp):
-        return super(Fork, self).apply(**{name: inp
+    @application(inputs='input_')
+    def apply(self, input_):
+        return super(Fork, self).apply(**{name: input_
                                           for name in self.fork_names})
 
     @apply.property('outputs')

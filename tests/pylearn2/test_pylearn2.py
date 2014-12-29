@@ -1,19 +1,20 @@
 import logging
+import os
 
 import numpy
-import theano
-from theano import tensor
 import pylearn2
 from pylearn2.testing.datasets import random_dense_design_matrix
 from pylearn2.training_algorithms.sgd import SGD
+from theano import tensor
 
 from blocks.bricks import Sigmoid, MLP
 from blocks.bricks.cost import SquaredError
 from blocks.initialization import IsotropicGaussian, Constant
 from blocks.pylearn2 import Pylearn2Model, Pylearn2Cost, Pylearn2Train
+from blocks.pylearn2.examples.markov_chain import main
 
 
-def test_pylearn2_trainin():
+def test_pylearn2_training():
     # Construct the model
     mlp = MLP(activations=[Sigmoid(), Sigmoid()], dims=[784, 100, 784],
               weights_init=IsotropicGaussian(), biases_init=Constant(0.01))
@@ -38,3 +39,13 @@ def test_pylearn2_trainin():
               monitoring_dataset=valid_dataset)
     train = Pylearn2Train(train_dataset, block_model, algorithm=sgd)
     train.main_loop(time_budget=3)
+
+
+def test_markov_chain():
+    # Silence Pylearn2's logger
+    logger = logging.getLogger(pylearn2.__name__)
+    logger.setLevel(logging.ERROR)
+
+    filename = 'unittest_markov_chain'
+    main('train', filename, 0, 3, False)
+    os.remove(filename)

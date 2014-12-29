@@ -1,10 +1,10 @@
-"""Sequence generation framework"""
+"""Sequence generation framework."""
 from abc import ABCMeta, abstractmethod
 
 from theano import tensor
 
-from blocks.bricks import (application, Brick, DefaultRNG, Identity, lazy, MLP,
-                           Initializeable)
+from blocks.bricks import (application, Brick, Initializable, Identity, lazy,
+                           MLP, Random)
 from blocks.bricks.recurrent import BaseRecurrent
 from blocks.bricks.parallel import Fork, Mixer
 from blocks.bricks.lookup import LookupTable
@@ -12,50 +12,52 @@ from blocks.bricks.recurrent import recurrent
 from blocks.utils import dict_subset, dict_union, update_instance
 
 
-class BaseSequenceGenerator(Initializeable):
+class BaseSequenceGenerator(Initializable):
     """A generic sequence generator.
 
     This class combines two components, a readout network and an
     attention-equipped recurrent transition, into a context-dependent
-    sequence generator. Optionally a third component can be used which forks
-    feedback from the readout network to obtain inputs for the transition.
+    sequence generator. Optionally a third component can be used which
+    forks feedback from the readout network to obtain inputs for the
+    transition.
 
     **Definitions:**
 
-    * *States* of the generator are the states of the transition as specified
-      in `transition.state_names`.
+    * *States* of the generator are the states of the transition as
+      specified in `transition.state_names`.
 
     * *Contexts* of the generator are the contexts of the transition as
       specified in `transition.context_names`.
 
-    * *Glimpses* are intermediate entities computed at every generation step
-      from states, contexts and the previous step glimpses. They are computed
-      in the transition's `apply` method when not given or by explicitly
-      calling the transition's `take_look` method. The set of glimpses
-      considered is specified in `transition.glimpse_names`.
+    * *Glimpses* are intermediate entities computed at every generation
+      step from states, contexts and the previous step glimpses. They are
+      computed in the transition's `apply` method when not given or by
+      explicitly calling the transition's `take_look` method. The set of
+      glimpses considered is specified in `transition.glimpse_names`.
 
     The generation algorithm description follows.
 
     **Algorithm:**
 
-    0. The initial states are computed from the contexts. This includes fake
-       initial outputs given by the `initial_outputs` method of the readout,
-       initial states and glimpses given by the `initial_state` method of the
-       transition.
+    0. The initial states are computed from the contexts. This includes
+       fake initial outputs given by the `initial_outputs` method of the
+       readout, initial states and glimpses given by the `initial_state`
+       method of the transition.
 
-    1. Given the contexts, the current state and the glimpses from the previous
-       step the attention mechanism hidden in the transition produces current
-       step glimpses. This happens in the `take_look` method of the transition.
+    1. Given the contexts, the current state and the glimpses from the
+       previous step the attention mechanism hidden in the transition
+       produces current step glimpses. This happens in the `take_look`
+       method of the transition.
 
     2. Using the contexts, the fed back output from the previous step, the
-       current states and glimpses, the readout brick is used to generate the
-       new output by calling its `readout` and `emit` methods.
+       current states and glimpses, the readout brick is used to generate
+       the new output by calling its `readout` and `emit` methods.
 
     3. The new output is fed back in the `feedback` method of the readout
-       brick. This feedback, together with the contexts, the glimpses and the
-       previous states is used to get the new states in the transition's
-       `apply` method. Optionally the `fork` brick is used in between to
-       compute the transition's inputs from the feedback.
+       brick. This feedback, together with the contexts, the glimpses and
+       the previous states is used to get the new states in the
+       transition's `apply` method. Optionally the `fork` brick is used in
+       between to compute the transition's inputs from the feedback.
 
     4. Back to step 1 if desired sequence length is not yet reached.
 
@@ -84,10 +86,13 @@ class BaseSequenceGenerator(Initializeable):
     fork : :class:`Brick`
         The brick to compute the transition's inputs from the feedback.
 
+    Notes
+    -----
+    See :class:`Initializable` for initialization parameters.
+
     """
     @lazy
-    def __init__(self, readout, transition, fork=None, weights_init=None,
-                 biases_init=None, **kwargs):
+    def __init__(self, readout, transition, fork=None, **kwargs):
         super(BaseSequenceGenerator, self).__init__(**kwargs)
         update_instance(self, locals())
 
@@ -398,7 +403,7 @@ class Readout(AbstractReadout):
         return super(Readout, self).get_dim(name)
 
 
-class LinearReadout(Readout, Initializeable):
+class LinearReadout(Readout, Initializable):
     """Readout computed as sum of linear projections.
 
     Parameters
@@ -408,10 +413,13 @@ class LinearReadout(Readout, Initializeable):
     source_names : list of strs
         The names of information sources.
 
+    Notes
+    -----
+    See :class:`Initializable` for initialization parameters.
+
     """
     @lazy
-    def __init__(self, readout_dim, source_names,
-                 weights_init, biases_init, **kwargs):
+    def __init__(self, readout_dim, source_names, **kwargs):
         super(LinearReadout, self).__init__(readout_dim, **kwargs)
         update_instance(self, locals())
 
@@ -467,13 +475,12 @@ class TrivialEmitter(AbstractEmitter):
         return super(TrivialEmitter, self).get_dim(name)
 
 
-class SoftmaxEmitter(AbstractEmitter, DefaultRNG):
+class SoftmaxEmitter(AbstractEmitter, Initializable, Random):
     """A softmax emitter for the case of integer outputs.
 
     Interprets readout elements as energies corresponding to their indices.
 
     """
-
     def _probs(self, readouts):
         shape = readouts.shape
         return tensor.nnet.softmax(readouts.reshape(
@@ -511,7 +518,6 @@ class SoftmaxEmitter(AbstractEmitter, DefaultRNG):
 
 class TrivialFeedback(AbstractFeedback):
     """A feedback brick for the case when readout are outputs."""
-
     @lazy
     def __init__(self, output_dim, **kwargs):
         super(TrivialFeedback, self).__init__(**kwargs)
@@ -527,15 +533,15 @@ class TrivialFeedback(AbstractFeedback):
         return super(TrivialFeedback, self).get_dim(name)
 
 
-class LookupFeedback(AbstractFeedback, Initializeable):
+class LookupFeedback(AbstractFeedback, Initializable):
     """A feedback brick for the case when readout are integers.
 
     Stores and retrieves distributed representations of integers.
 
     Notes
     -----
-        Currently works only with lazy initialization
-        (can not be initialized with a single constructor call).
+    Currently works only with lazy initialization (can not be initialized
+    with a single constructor call).
 
     """
     def __init__(self, num_outputs=None, feedback_dim=None, **kwargs):
@@ -543,7 +549,7 @@ class LookupFeedback(AbstractFeedback, Initializeable):
         update_instance(self, locals())
 
         self.lookup = LookupTable(num_outputs, feedback_dim,
-                                  kwargs.get("weights_init"))
+                                  weights_init=self.weights_init)
         self.children = [self.lookup]
 
     def _push_allocation_config(self):
@@ -561,16 +567,14 @@ class LookupFeedback(AbstractFeedback, Initializeable):
         return super(LookupFeedback, self).get_dim(name)
 
 
-class AttentionTransition(AbstractAttentionTransition,
-                          Initializeable,
-                          DefaultRNG):
+class AttentionTransition(AbstractAttentionTransition, Initializable):
     """Combines an attention mechanism and a recurrent transition.
 
-    This brick is assembled from three components: an attention mechanism, a
-    recurrent transition and a mixer brick to make the first two work together.
-    It is expected that among the contexts of the transition's `apply` methods
-    there is one, intended to be attended by the attention mechanism, and
-    another one serving as a mask for the first one.
+    This brick is assembled from three components: an attention mechanism,
+    a recurrent transition and a mixer brick to make the first two work
+    together.  It is expected that among the contexts of the transition's
+    `apply` methods there is one, intended to be attended by the attention
+    mechanism, and another one serving as a mask for the first one.
 
     Parameters
     ----------
@@ -582,13 +586,14 @@ class AttentionTransition(AbstractAttentionTransition,
         The name of the attended context. If ``None``, the first context is
         used.
     attended_mask_name : str
-        The name of the mask for the attended context. If ``None``, the second
-        context is used.
+        The name of the mask for the attended context. If ``None``, the
+        second context is used.
 
     Notes
     -----
+    See :class:`Initializable` for initialization parameters.
 
-        Currently lazy-only.
+    Currently lazy-only.
 
     """
     def __init__(self, transition, attention, mixer,
@@ -628,11 +633,11 @@ class AttentionTransition(AbstractAttentionTransition,
 
     @application
     def take_look(self, **kwargs):
-        """Compute glimpses with the attention mechanism.
+        r"""Compute glimpses with the attention mechanism.
 
         Parameters
         ----------
-        **kwargs
+        \*\*kwargs
             Should contain contexts, previous step states and glimpses.
 
         Returns
@@ -653,11 +658,11 @@ class AttentionTransition(AbstractAttentionTransition,
 
     @application
     def compute_states(self, **kwargs):
-        """Compute current states when glimpses have already been computed.
+        r"""Compute current states when glimpses have already been computed.
 
         Parameters
         ----------
-        **kwargs
+        \*\*kwargs
             Should contain everything what `self.transition` needs
             and in addition current glimpses.
 
@@ -686,13 +691,14 @@ class AttentionTransition(AbstractAttentionTransition,
 
     @recurrent
     def do_apply(self, **kwargs):
-        """Process a sequence attending the attended context at every step.
+        r"""Process a sequence attending the attended context every step.
 
         Parameters
         ----------
-        **kwargs
-            Should contain current inputs, previous step states, contexts, the
-            preprocessed attended context, previous step glimpses.
+        \*\*kwargs
+            Should contain current inputs, previous step states, contexts,
+            the preprocessed attended context, previous step glimpses.
+
         Returns
         -------
         outputs : list of Theano variables
@@ -767,13 +773,13 @@ class AttentionTransition(AbstractAttentionTransition,
         return self.transition.get_dim(name)
 
 
-class FakeAttentionTransition(AbstractAttentionTransition, Initializeable):
+class FakeAttentionTransition(AbstractAttentionTransition, Initializable):
     """Adds fake attention interface to a transition.
 
     Notes
     -----
-        Currently works only with lazy initialization
-        (can not be initialized with a single constructor call).
+    Currently works only with lazy initialization (can not be initialized
+    with a single constructor call).
 
     """
     def __init__(self, transition, **kwargs):
@@ -826,19 +832,17 @@ class SequenceGenerator(BaseSequenceGenerator):
         The recurrent transition to be used in the sequence generator.
         Will be combined with `attention`, if that one is given.
     attention : :class:`Brick`
-        The attention mechanism to be added to `transition`. Can be ``None``,
-        in which case no attention mechanism is used.
+        The attention mechanism to be added to `transition`. Can be
+        ``None``, in which case no attention mechanism is used.
 
     Notes
     -----
-
-        Currently works only with lazy initialization
-        (uses blocks that can not be constructed with a single call).
+    Currently works only with lazy initialization (uses blocks that can not
+    be constructed with a single call).
 
     """
     def __init__(self, readout, transition, attention=None,
-                 fork_inputs=None, weights_init=None, biases_init=None,
-                 **kwargs):
+                 fork_inputs=None, **kwargs):
         if not fork_inputs:
             fork_inputs = [name for name in transition.apply.sequences
                            if name != 'mask']
@@ -853,4 +857,4 @@ class SequenceGenerator(BaseSequenceGenerator):
             transition = FakeAttentionTransition(transition,
                                                  name="with_fake_attention")
         super(SequenceGenerator, self).__init__(
-            readout, transition, fork, weights_init, biases_init, **kwargs)
+            readout, transition, fork, **kwargs)

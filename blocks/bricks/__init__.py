@@ -1,12 +1,10 @@
-"""Bricks module
-
-This defines the basic interface of bricks.
-"""
+"""The interface of bricks and some simple implementations."""
 import inspect
 import functools
 import logging
 from abc import ABCMeta
 from collections import OrderedDict
+from itertools import chain
 
 import numpy
 from theano import tensor
@@ -96,6 +94,9 @@ class Brick(object):
         this behaviour. However, it does require a separate call to
         :meth:`initialize`. If set to ``False`` on the other hand, bricks
         will be ready to run after construction.
+    print_shapes : bool
+        ``False`` by default. If ``True`` it logs the shapes of all the
+        input and output variables, which can be useful for debugging.
     params : list of Theano shared variables
         After calling the :meth:`allocate` method this attribute will be
         populated with the shared variables storing this brick's
@@ -166,7 +167,7 @@ class Brick(object):
     __metaclass__ = ABCMeta
     #: See :attr:`Brick.lazy`
     lazy = True
-    # Turns on debug logging of input/output shapes
+    #: See :attr:`Brick.print_shapes`
     print_shapes = False
 
     def __init__(self, name=None):
@@ -247,6 +248,7 @@ class Brick(object):
         -----
         If the brick has not allocated its parameters yet, this method will
         call the :meth:`allocate` method in order to do so.
+
         """
         if not self.allocated:
             self.allocate()
@@ -428,9 +430,7 @@ def lazy(func):
 
 
 class VariableRole(object):
-    """
-    A dummy class to keep track of brick roles
-    """
+    """A collection of constants referring to variable roles."""
     COST = "cost"
     INPUT = "input"
     OUTPUT = "output"
@@ -439,25 +439,23 @@ class VariableRole(object):
 
 
 class ApplicationCall(object):
-    """A link between the tags in the Theano graph and the application
-    and brick that created them.
+    """A link between the variable tags and bricks.
 
     The application call can be used to attach to an apply call auxiliary
-    variables (e.g. monitors or regularizers)
-    that do not form part of the main computation graph.
+    variables (e.g. monitors or regularizers) that do not form part of the
+    main computation graph.
 
     The application call object is created before the call to the
-    application method and can be accessed by
-    specifying an application_call argument.
-
+    application method and can be accessed by specifying an
+    application_call argument.
 
     Parameters
     ----------
     brick : object
         The brick whose application is called
-
     application : object
         The application object being called
+
     """
     def __init__(self, brick, application):
         self.brick = brick
@@ -466,10 +464,6 @@ class ApplicationCall(object):
         self.updates = []
 
     def add_auxiliary_variable(self, expression, role):
-        # the copy destorys the name.
-        # I (JCh) believe adding a role tag is pretty harmless,
-        # so I don't copy
-        # expression = expression.copy()
         expression.tag.role = role
         self.auxiliary_variables.append(expression)
 
@@ -512,8 +506,8 @@ class Application(object):
 
         This wrapper will provide some necessary pre- and post-processing
         of the Theano variables, such as tagging them with the brick that
-        created them and naming them. These changes will apply to
-        Theano variables given as positional arguments and keywords arguments.
+        created them and naming them. These changes will apply to Theano
+        variables given as positional arguments and keywords arguments.
 
         .. warning::
 
@@ -566,11 +560,11 @@ class Application(object):
         if not self.brick.initialized and not self.brick.lazy:
             self.brick.initialize()
         inputs = list(inputs)
-        for i, inp in enumerate(inputs):
+        for i, input_ in enumerate(inputs):
             name = (arg_names[i] if i < len(arg_names) else
                     "{}_{}".format(varargs_name, i - len(arg_names)))
-            if isinstance(inp, tensor.Variable):
-                inputs[i] = copy_and_tag(inp, VariableRole.INPUT,
+            if isinstance(input_, tensor.Variable):
+                inputs[i] = copy_and_tag(input_, VariableRole.INPUT,
                                          name)
         for key, value in kwargs.items():
             if isinstance(value, tensor.Variable):
@@ -716,7 +710,7 @@ def application_wrapper(**kwargs):
 
 
 def application(*args, **kwargs):
-    """Decorator for methods that apply a brick to inputs.
+    r"""Decorator for methods that apply a brick to inputs.
 
     This decorator performs two functions: It creates an application method
     (tagging the inputs and outputs as such in the Theano graph) and
@@ -725,9 +719,9 @@ def application(*args, **kwargs):
 
     Parameters
     ----------
-    *args, optional
+    \*args, optional
         The application method to wrap.
-    **kwargs, optional
+    \*\*kwargs, optional
         See :meth:`signature`
 
     Notes
@@ -748,28 +742,88 @@ def application(*args, **kwargs):
         return application
 
 
-class DefaultRNG(Brick):
-    """A mixin class for Bricks which need random number generators.
+class Random(Brick):
+    """A mixin class for Bricks which need Theano RNGs.
 
     Parameters
     ----------
-    rng : object
-        A ``numpy.RandomState`` instance.
     theano_rng : object
         A ``tensor.shared_randomstreams.RandomStreams`` instance.
 
     """
-    def __init__(self, rng=None, theano_rng=None, **kwargs):
-        super(DefaultRNG, self).__init__(**kwargs)
+    def __init__(self, theano_rng=None, **kwargs):
+        super(Random, self).__init__(**kwargs)
         update_instance(self, locals())
 
     @property
-    def rng(self):
-        """
-        If a RNG has been set, return it. Otherwise, return a RNG with a
-        default seed which can be set at a module level using
+    def theano_rng(self):
+        """Returns Brick's Theano RNG, or a default one.
+
+        The default seed which can be set at a module level using
         ``blocks.bricks.DEFAULT_SEED = seed``.
+
         """
+        if getattr(self, '_theano_rng', None) is not None:
+            return self._theano_rng
+        else:
+            return tensor.shared_randomstreams.RandomStreams(DEFAULT_SEED)
+
+    @theano_rng.setter
+    def theano_rng(self, theano_rng):
+        self._theano_rng = theano_rng
+
+
+class Initializable(Brick):
+    """Base class for bricks which push parameter initialization.
+
+    Many bricks will initialize children which perform a linear
+    transformation, often with biases. This brick allows the weights
+    and biases initialization to be configured in the parent brick and
+    pushed down the hierarchy.
+
+    Parameters
+    ----------
+    weights_init : object
+        A `NdarrayInitialization` instance which will be used by to
+        initialize the weight matrix. Required by :meth:`initialize`.
+    biases_init : object, optional
+        A `NdarrayInitialization` instance that will be used to initialize
+        the biases. Required by :meth:`initialize` when `use_bias` is
+        `True`. Only supported by bricks for which :attr:`has_biases` is
+        ``True``.
+    use_bias : bool, optional
+        Whether to use a bias. Defaults to `True`. Required by
+        :meth:`initialize`. Only supported by bricks for which
+        :attr:`has_biases` is ``True``.
+    rng : object
+        A ``numpy.RandomState`` instance.
+
+    Attributes
+    ----------
+    has_biases : bool
+        ``False`` if the brick does not support biases, and only has
+        :attr:`weights_init`.  For an example of this, see
+        :class:`Bidirectional`. If this is ``False``, the brick does not
+        support the arguments ``biases_init`` or ``use_bias``.
+
+    """
+    has_biases = True
+
+    @lazy
+    def __init__(self, weights_init, biases_init=None, use_bias=True, rng=None,
+                 **kwargs):
+        super(Initializable, self).__init__(**kwargs)
+        self.weights_init = weights_init
+        if self.has_biases:
+            self.biases_init = biases_init
+        else:
+            if biases_init is not None or not use_bias:
+                raise ValueError("This brick does not support biases config")
+        self.use_bias = use_bias
+        self.rng = rng
+
+    @property
+    def rng(self):
         if getattr(self, '_rng', None) is not None:
             return self._rng
         else:
@@ -779,24 +833,22 @@ class DefaultRNG(Brick):
     def rng(self, rng):
         self._rng = rng
 
-    @property
-    def theano_rng(self):
-        """
-        If a RandomStreams was given in the constructor, return it.
-        Otherwise, return one seeded with ``blocks.bricks.DEFAULT_SEED``.
-        """
-        if getattr(self, '_rng', None) is not None:
-            return self._rng
-        else:
-            return tensor.shared_randomstreams.RandomStreams(DEFAULT_SEED)
-
-    @theano_rng.setter
-    def theano_rng(self, theano_rng):
-        self._theano_rng = theano_rng
+    def _push_initialization_config(self):
+        for child in self.children:
+            if isinstance(child, Initializable):
+                child.rng = self.rng
+                if self.weights_init:
+                    child.weights_init = self.weights_init
+        if hasattr(self, 'biases_init') and self.biases_init:
+            for child in self.children:
+                if (isinstance(child, Initializable) and
+                        hasattr(child, 'biases_init')):
+                    child.biases_init = self.biases_init
+        super(Initializable, self)._push_initialization_config()
 
 
-class Linear(DefaultRNG):
-    """A linear transformation with optional bias.
+class Linear(Initializable):
+    r"""A linear transformation with optional bias.
 
     Linear brick which applies a linear (affine) transformation by
     multiplying the input with a weight matrix. Optionally a bias is added.
@@ -807,19 +859,10 @@ class Linear(DefaultRNG):
         The dimension of the input. Required by :meth:`allocate`.
     output_dim : int
         The dimension of the output. Required by :meth:`allocate`.
-    weights_init : object
-        A `NdarrayInitialization` instance which will be used by to
-        initialize the weight matrix. Required by :meth:`initialize`.
-    biases_init : object, optional
-        A `NdarrayInitialization` instance that will be used to initialize
-        the biases. Required by :meth:`initialize` when `use_bias` is
-        `True`.
-    use_bias : bool, optional
-        Whether to use a bias. Defaults to `True`. Required by
-        :meth:`initialize`.
 
     Notes
     -----
+    See :class:`Initializable` for initialization parameters.
 
     A linear transformation with bias is a matrix multiplication followed
     by a vector summation.
@@ -828,8 +871,7 @@ class Linear(DefaultRNG):
 
     """
     @lazy
-    def __init__(self, input_dim, output_dim, weights_init,
-                 biases_init=None, use_bias=True, **kwargs):
+    def __init__(self, input_dim, output_dim, **kwargs):
         super(Linear, self).__init__(**kwargs)
         update_instance(self, locals())
 
@@ -849,13 +891,13 @@ class Linear(DefaultRNG):
             W, = self.params
         self.weights_init.initialize(W, self.rng)
 
-    @application(inputs=['inp'], outputs=['output'])
-    def apply(self, inp):
+    @application(inputs=['input_'], outputs=['output'])
+    def apply(self, input_):
         """Apply the linear transformation.
 
         Parameters
         ----------
-        inp : Theano variable
+        input_ : Theano variable
             The input on which to apply the transformation
 
         Returns
@@ -868,7 +910,7 @@ class Linear(DefaultRNG):
             W, b = self.params
         else:
             W, = self.params
-        output = tensor.dot(inp, W)
+        output = tensor.dot(input_, W)
         if self.use_bias:
             output += b
         return output
@@ -877,12 +919,12 @@ class Linear(DefaultRNG):
 class Maxout(Brick):
     """Maxout pooling transformation.
 
-    A brick that does max pooling over groups of input units. If you use this
-    code in a research project, please cite [GWFM1313]_.
+    A brick that does max pooling over groups of input units. If you use
+    this code in a research project, please cite [GWFM1313]_.
 
-    .. [GWFM1313] Ian J. Goodfellow, David Warde-Farley,
-       Mehdi Mirza, Aaron Courville, and Yoshua Bengio, *Maxout networks*,
-       ICML (2013), pp. 1319-1327.
+    .. [GWFM1313] Ian J. Goodfellow, David Warde-Farley, Mehdi Mirza, Aaron
+       Courville, and Yoshua Bengio, *Maxout networks*, ICML (2013), pp.
+       1319-1327.
 
     Parameters
     ----------
@@ -891,23 +933,22 @@ class Maxout(Brick):
 
     Notes
     -----
-    Maxout applies a set of linear transformations to a vector and selects for
-    each output dimension the result with the highest value.
+    Maxout applies a set of linear transformations to a vector and selects
+    for each output dimension the result with the highest value.
 
     """
-
     @lazy
     def __init__(self, num_pieces, **kwargs):
         super(Maxout, self).__init__(**kwargs)
         self.num_pieces = num_pieces
 
-    @application(inputs=['inp'], outputs=['output'])
-    def apply(self, inp):
+    @application(inputs=['input_'], outputs=['output'])
+    def apply(self, input_):
         """Apply the maxout transformation.
 
         Parameters
         ----------
-        inp : Theano variable
+        input_ : Theano variable
             The input on which to apply the transformation
 
         Returns
@@ -916,16 +957,16 @@ class Maxout(Brick):
             The transformed input
 
         """
-        last_dim = inp.shape[-1]
+        last_dim = input_.shape[-1]
         output_dim = last_dim // self.num_pieces
-        new_shape = ([inp.shape[i] for i in range(inp.ndim - 1)]
+        new_shape = ([input_.shape[i] for i in range(input_.ndim - 1)]
                      + [output_dim, self.num_pieces])
-        output = tensor.max(inp.reshape(new_shape, ndim=inp.ndim + 1),
-                            axis=inp.ndim)
+        output = tensor.max(input_.reshape(new_shape, ndim=input_.ndim + 1),
+                            axis=input_.ndim)
         return output
 
 
-class LinearMaxout(DefaultRNG):
+class LinearMaxout(Initializable):
     """Maxout pooling following a linear transformation.
 
     This code combines the :class:`Linear` brick with a :class:`Maxout`
@@ -939,36 +980,34 @@ class LinearMaxout(DefaultRNG):
         The dimension of the output. Required by :meth:`allocate`.
     num_pieces : int
         The number of linear functions. Required by :meth:`allocate`.
-    weights_init : object
-        A `NdarrayInitialization` instance which will be used by to
-        initialize the weight matrix. Required by :meth:`initialize`.
-    biases_init : object
-        A `NdarrayInitialization` instance that will be used to initialize
-        the biases. Required by :meth:`initialize`.
+
+    Notes
+    -----
+    See :class:`Initializable` for initialization parameters.
 
     """
     @lazy
-    def __init__(self, input_dim, output_dim, num_pieces, weights_init,
-                 biases_init, **kwargs):
+    def __init__(self, input_dim, output_dim, num_pieces, **kwargs):
         super(LinearMaxout, self).__init__(**kwargs)
         update_instance(self, locals())
         self.linear_transformation = Linear(name='linear_to_maxout',
                                             input_dim=input_dim,
                                             output_dim=output_dim * num_pieces,
-                                            weights_init=weights_init,
-                                            biases_init=biases_init)
+                                            weights_init=self.weights_init,
+                                            biases_init=self.biases_init,
+                                            use_bias=self.use_bias)
         self.maxout_transformation = Maxout(name='maxout',
                                             num_pieces=num_pieces)
         self.children = [self.linear_transformation,
                          self.maxout_transformation]
 
-    @application(inputs=['inp'], outputs=['output'])
-    def apply(self, inp):
+    @application(inputs=['input_'], outputs=['output'])
+    def apply(self, input_):
         """Apply the linear transformation followed by maxout.
 
         Parameters
         ----------
-        inp : Theano variable
+        input_ : Theano variable
             The input on which to apply the transformations
 
         Returns
@@ -977,7 +1016,7 @@ class LinearMaxout(DefaultRNG):
             The transformed input
 
         """
-        pre_activation = self.linear_transformation.apply(inp)
+        pre_activation = self.linear_transformation.apply(input_)
         output = self.maxout_transformation.apply(pre_activation)
         return output
 
@@ -986,13 +1025,13 @@ def _activation_factory(name, activation):
     """Class factory for Bricks which perform simple Theano calls."""
     class Activation(Brick):
         """Element-wise application of {0} function."""
-        @application(inputs=['inp'], outputs=['output'])
-        def apply(self, inp):
+        @application(inputs=['input_'], outputs=['output'])
+        def apply(self, input_):
             """Apply the {0} function element-wise.
 
             Parameters
             ----------
-            inp : Theano variable
+            input_ : Theano variable
                 Theano variable to apply {0} to, element-wise.
 
             Returns
@@ -1001,7 +1040,7 @@ def _activation_factory(name, activation):
                 The input with the activation function applied.
 
             """
-            output = activation(inp)
+            output = activation(input_)
             return output
     Activation.__name__ = name
     Activation.__doc__ = Activation.__doc__.format(name.lower())
@@ -1015,8 +1054,40 @@ Sigmoid = _activation_factory('Sigmoid', tensor.nnet.sigmoid)
 Softmax = _activation_factory('Softmax', tensor.nnet.softmax)
 
 
-class MLP(DefaultRNG):
-    """A simple multi-layer perceptron
+class Sequence(Brick):
+    """A sequence of bricks.
+
+    This brick simply applies a sequence of bricks, assuming that their in-
+    and outputs are compatible.
+
+    Parameters
+    ----------
+    bricks : list of :class:`Brick` instances
+        The bricks in the order that they need to be applied.
+    application_methods : list of application method names, optional
+        If not given, it uses ``'apply'`` for each brick.
+
+    """
+    def __init__(self, bricks, application_methods=None, **kwargs):
+        super(Sequence, self).__init__(**kwargs)
+        if application_methods is None:
+            application_methods = ['apply' for brick in bricks]
+        assert len(application_methods) == len(bricks)
+        self.children = bricks
+        self.application_methods = application_methods
+
+    @application(inputs=['input_'], outputs=['output'])
+    def apply(self, input_):
+        child_input = input_
+        for child, application_method in zip(self.children,
+                                             self.application_methods):
+            output = getattr(child, application_method)(*pack(child_input))
+            child_input = output
+        return output
+
+
+class MLP(Sequence, Initializable):
+    """A simple multi-layer perceptron.
 
     Parameters
     ----------
@@ -1027,15 +1098,11 @@ class MLP(DefaultRNG):
     dims : list of ints
         A list of input dimensions, as well as the output dimension of the
         last layer. Required for :meth:`allocate`.
-    weights_init : :class:`utils.NdarrayInitialization`
-        The initialization scheme to initialize all the weights with.
-    biases_init : :class:`utils.NdarrayInitialization`
-        The initialization scheme to initialize all the biases with.
-    use_bias : bool
-        Whether or not to use biases.
 
     Notes
     -----
+    See :class:`Initializable` for initialization parameters.
+
     Note that the ``weights_init``, ``biases_init`` and ``use_bias``
     configurations will overwrite those of the layers each time the
     :class:`MLP` is re-initialized. For more fine-grained control, push the
@@ -1044,25 +1111,25 @@ class MLP(DefaultRNG):
     >>> from blocks.initialization import IsotropicGaussian, Constant
     >>> Brick.lazy = True
     >>> mlp = MLP(activations=[Tanh(), None], dims=[30, 20, 10],
-    ...           weights_init=IsotropicGaussian(), biases_init=Constant(1))
+    ...           weights_init=IsotropicGaussian(),
+    ...           biases_init=Constant(1))
     >>> mlp.push_initialization_config()  # Configure children
     >>> mlp.children[0].weights_init = IsotropicGaussian(0.1)
     >>> mlp.initialize()
 
     """
-
     @lazy
-    def __init__(self, activations, dims, weights_init, biases_init=None,
-                 use_bias=True, **kwargs):
-        super(MLP, self).__init__(**kwargs)
+    def __init__(self, activations, dims, **kwargs):
+        update_instance(self, locals())
         self.linear_transformations = [Linear(name='linear_{}'.format(i))
                                        for i in range(len(activations))]
-        self.children = (self.linear_transformations +
-                         [activation for activation in activations
-                          if activation is not None])
+        # Interleave the transformations and activations
+        children = [child for child in list(chain(*zip(
+            self.linear_transformations, activations))) if child is not None]
         if not dims:
             dims = [None] * (len(activations) + 1)
-        update_instance(self, locals())
+        self.dims = dims
+        super(MLP, self).__init__(children, **kwargs)
 
     def _push_allocation_config(self):
         assert len(self.dims) - 1 == len(self.linear_transformations)
@@ -1071,53 +1138,3 @@ class MLP(DefaultRNG):
             layer.input_dim = input_dim
             layer.output_dim = output_dim
             layer.use_bias = self.use_bias
-
-    def _push_initialization_config(self):
-        for layer in self.linear_transformations:
-            for attr in ['weights_init', 'biases_init']:
-                setattr(layer, attr, getattr(self, attr))
-
-    @application(inputs=['inp'], outputs=['output'])
-    def apply(self, inp):
-        """Perform the forward propagation.
-
-        Parameters
-        ----------
-        inp : Theano variable
-            Perform the forward propogation of the MLP.
-
-        Returns
-        -------
-        output : Theano variable
-            The output of the last layer.
-
-        """
-        output = inp
-        for activation, linear in zip(self.activations,
-                                      self.linear_transformations):
-            if activation is None:
-                output = linear.apply(output)
-            else:
-                output = activation.apply(linear.apply(output))
-        return output
-
-
-class Initializeable(Brick):
-    """Base class for bricks which push parameter initialization.
-
-    Set :meth:`_no_bias_initialization = True`
-    if the brick should only push :meth:`weights_init`.
-    For an example, see :class:`Bidirectional`.
-
-    """
-    def _push_initialization_config(self):
-        for child in self.children:
-            if self.weights_init:
-                child.weights_init = self.weights_init
-        if not getattr(self, '_no_bias_initialization', False):
-            for child in self.children:
-                if getattr(child, '_no_bias_initialization', False):
-                    continue
-                if self.biases_init:
-                    child.biases_init = self.biases_init
-            super(Initializeable, self)._push_initialization_config()

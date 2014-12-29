@@ -19,7 +19,6 @@ class GroundhogIterator(object):
     Has mock implementations of all required methods except `next`.
 
     """
-
     __metaclass__ = ABCMeta
 
     def start(self, offset):
@@ -36,7 +35,6 @@ class GroundhogIterator(object):
 
 class GroundhogModel(object):
     """Wraps a model into a Groundhog compatible interface."""
-
     def __init__(self, bricks, cost):
         if not isinstance(bricks, Selector):
             bricks = Selector(bricks)
@@ -90,7 +88,7 @@ class GroundhogModel(object):
                                                updates=self.updates)
         for batch in data:
             sums += numpy.hstack(self._valid_func(
-                *[batch[inp.name] for inp in self.inputs]))
+                *[batch[input_.name] for input_ in self.inputs]))
             num_batches += 1
         return zip(valid_names, sums / num_batches)
 
@@ -117,7 +115,6 @@ class GroundhogModel(object):
 
 class GroundhogState(object):
     """Good default values for groundhog state."""
-
     def __init__(self, prefix, batch_size, learning_rate, **kwargs):
         self.prefix = prefix
         self.bs = batch_size
