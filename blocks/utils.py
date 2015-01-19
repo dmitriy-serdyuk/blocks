@@ -6,6 +6,9 @@ import six
 import theano
 from theano import tensor
 from theano import printing
+from theano.scalar import ScalarConstant
+from theano.tensor import TensorConstant
+from theano.tensor.sharedvar import SharedVariable
 
 
 def pack(arg):
@@ -42,8 +45,9 @@ def unpack(arg, singleton=False):
         will be cast to a list before returning. Any other variable
         will be returned as is.
     singleton : bool
-        If ``True``, `arg` is expected to be a singleton and an exception
-        is raised if this is not the case. ``False`` by default.
+        If ``True``, `arg` is expected to be a singleton (a list or tuple
+        with exactly one element) and an exception is raised if this is not
+        the case. ``False`` by default.
 
     Returns
     -------
@@ -95,6 +99,27 @@ def shared_floatx(value, name=None, borrow=False, dtype=None):
     return theano.shared(theano._asarray(value, dtype=dtype),
                          name=name,
                          borrow=borrow)
+
+
+def shared_like(expression, name=None):
+    """Construct a shared variable to hold the results of a theano expression.
+
+    Parameters
+    ----------
+    expression : theano variable
+        The expression whose dtype and ndim will be used to construct
+        the new shared variable.
+    name : string or None
+        The name of the shared variable. If None, the name is determined
+        based on expression's name.
+
+    """
+    expression = tensor.as_tensor_variable(expression)
+    if name is None:
+        name = "shared_{}".format(expression.name)
+    return theano.shared(numpy.zeros((0,) * expression.ndim,
+                                     dtype=expression.dtype),
+                         name=name)
 
 
 def reraise_as(new_exc):
@@ -198,12 +223,63 @@ def check_theano_variable(variable, n_dim, dtype_prefix):
                              dtype_prefix, variable.dtype))
 
 
-def dict_subset(dikt, keys, pop=False, must_have=True):
+def is_graph_input(variable):
+    """Check if variable is a user-provided graph input.
+
+    To be considered an input the variable must have no owner, and not
+    be a constant or shared variable.
+
+    Parameters
+    ----------
+    variable : theano expression
+
+    Returns
+    -------
+    bool
+        ``True`` If the variable is a user-provided input to the graph.
+
+    """
+    return (not variable.owner and
+            not isinstance(variable, SharedVariable) and
+            not isinstance(variable, TensorConstant) and
+            not isinstance(variable, ScalarConstant))
+
+
+def is_shared_variable(variable):
+    """Check if a variable is a Theano shared variable."""
+    return isinstance(variable, SharedVariable)
+
+
+def graph_inputs(variables, blockers=None):
+    """Compute inputs needed to compute values in variables.
+
+    This function is similar to :meth:`theano.gof.graph.inputs`. However,
+    it doesn't treat shared and constant values as inputs.
+
+    Parameters
+    ----------
+    variables : list of theano variables
+        The outputs whose inputs are sought for.
+    blockers : list of theano variables
+        See :meth:`theano.gof.graph.inputs` for documentation.
+
+    Returns
+    -------
+    list
+        Theano variables which are non-constant and non-shared inputs to
+        the computational graph.
+
+    """
+    inps = theano.gof.graph.inputs(variables, blockers=blockers)
+    return [i for i in inps if is_graph_input(i)]
+
+
+def dict_subset(dict_, keys, pop=False, must_have=True):
     """Return a subset of a dictionary corresponding to a set of keys.
 
     Parameters
     ----------
-    dikt : dict
+    dict_ : dict
         The dictionary.
     keys : iterable
         The keys of interest.
@@ -226,14 +302,14 @@ def dict_subset(dikt, keys, pop=False, must_have=True):
     def extract(k):
         if pop:
             if must_have:
-                return dikt.pop(k)
-            return dikt.pop(k, not_found)
+                return dict_.pop(k)
+            return dict_.pop(k, not_found)
         if must_have:
-            return dikt[k]
-        return dikt.get(k, not_found)
+            return dict_[k]
+        return dict_.get(k, not_found)
 
     result = [(key, extract(key)) for key in keys]
-    return OrderedDict([(k, v) for k, v in result if v != not_found])
+    return OrderedDict([(k, v) for k, v in result if v is not not_found])
 
 
 def dict_union(*dicts, **kwargs):

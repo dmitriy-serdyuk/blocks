@@ -1,6 +1,7 @@
 """Sequence generation framework."""
 from abc import ABCMeta, abstractmethod
 
+from six import add_metaclass
 from theano import tensor
 
 from blocks.bricks import (application, Brick, Initializable, Identity, lazy,
@@ -63,7 +64,7 @@ class BaseSequenceGenerator(Initializable):
 
     | A scheme of the algorithm described above follows.
 
-    .. image:: sequence_generator_scheme.png
+    .. image:: _static/sequence_generator_scheme.png
             :height: 500px
             :width: 500px
 
@@ -277,10 +278,9 @@ class BaseSequenceGenerator(Initializable):
             assert False
 
 
+@add_metaclass(ABCMeta)
 class AbstractEmitter(Brick):
     """The interface for the emitter component of a readout."""
-    __metaclass__ = ABCMeta
-
     @abstractmethod
     def emit(self, readouts):
         pass
@@ -298,15 +298,15 @@ class AbstractEmitter(Brick):
         pass
 
 
+@add_metaclass(ABCMeta)
 class AbstractFeedback(Brick):
     """The interface for the feedback component of a readout."""
-    __metaclass__ = ABCMeta
-
     @abstractmethod
     def feedback(self, outputs):
         pass
 
 
+@add_metaclass(ABCMeta)
 class AbstractReadout(AbstractEmitter, AbstractFeedback):
     """The interface for the readout component of a sequence generator.
 
@@ -315,21 +315,18 @@ class AbstractReadout(AbstractEmitter, AbstractFeedback):
        Explain what the methods should do.
 
     """
-    __metaclass__ = ABCMeta
-
     @abstractmethod
     def readout(self, **kwargs):
         pass
 
 
+@add_metaclass(ABCMeta)
 class AbstractAttentionTransition(BaseRecurrent):
     """A base class for a transition component of a sequence generator.
 
     A recurrent transition combined with an attention mechanism.
 
     """
-    __metaclass__ = ABCMeta
-
     @abstractmethod
     def apply(self, **kwargs):
         pass
@@ -343,6 +340,7 @@ class AbstractAttentionTransition(BaseRecurrent):
         pass
 
 
+@add_metaclass(ABCMeta)
 class Readout(AbstractReadout):
     """Readout brick with separated emitting and feedback parts.
 
