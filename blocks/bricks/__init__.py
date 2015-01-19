@@ -2,11 +2,11 @@
 import inspect
 import functools
 import logging
-from abc import ABCMeta
 from collections import OrderedDict
 from itertools import chain
 
 import numpy
+from six import add_metaclass
 from theano import tensor
 
 from blocks.utils import (pack, repr_attrs, reraise_as, shared_floatx_zeros,
@@ -164,7 +164,6 @@ class Brick(object):
     linear_apply_output
 
     """
-    __metaclass__ = ABCMeta
     #: See :attr:`Brick.lazy`
     lazy = True
     #: See :attr:`Brick.print_shapes`
@@ -386,7 +385,6 @@ def lazy(func):
 
     Examples
     --------
-    >>> from __future__ import print_function
     >>> class SomeBrick(Brick):
     ...     @lazy
     ...     def __init__(self, a, b, c='c', d=None):
@@ -463,17 +461,21 @@ class ApplicationCall(object):
         self.auxiliary_variables = []
         self.updates = []
 
-    def add_auxiliary_variable(self, expression, role):
+    def add_auxiliary_variable(self, expression, role, name=None):
+        if name is not None:
+            expression.name = name
         expression.tag.role = role
         self.auxiliary_variables.append(expression)
 
-    def add_monitor(self, expression):
+    def add_monitor(self, expression, name=None):
         return self.add_auxiliary_variable(expression,
-                                           role=VariableRole.MONITOR)
+                                           role=VariableRole.MONITOR,
+                                           name=name)
 
-    def add_additional_cost(self, expression):
+    def add_additional_cost(self, expression, name=None):
         return self.add_auxiliary_variable(expression,
-                                           role=VariableRole.ADDITIONAL_COST)
+                                           role=VariableRole.ADDITIONAL_COST,
+                                           name=name)
 
 
 class Application(object):
@@ -1023,6 +1025,14 @@ class LinearMaxout(Initializable):
 
 def _activation_factory(name, activation):
     """Class factory for Bricks which perform simple Theano calls."""
+    class ActivationDocumentation(type):
+        def __new__(cls, name, bases, classdict):
+            classdict['__doc__'] = classdict['__doc__'].format(name.lower())
+            classdict['apply'].__doc__ = \
+                classdict['apply'].__doc__.format(name.lower())
+            return type.__new__(cls, name, bases, classdict)
+
+    @add_metaclass(ActivationDocumentation)
     class Activation(Brick):
         """Element-wise application of {0} function."""
         @application(inputs=['input_'], outputs=['output'])
@@ -1043,15 +1053,14 @@ def _activation_factory(name, activation):
             output = activation(input_)
             return output
     Activation.__name__ = name
-    Activation.__doc__ = Activation.__doc__.format(name.lower())
-    Activation.apply.__doc__ = \
-        Activation.apply.__doc__.format(name.lower())
     return Activation
 
 Identity = _activation_factory('Identity', lambda x: x)
 Tanh = _activation_factory('Tanh', tensor.tanh)
 Sigmoid = _activation_factory('Sigmoid', tensor.nnet.sigmoid)
 Softmax = _activation_factory('Softmax', tensor.nnet.softmax)
+Rectifier = _activation_factory('Rectifier',
+                                lambda x: tensor.switch(x > 0, x, 0))
 
 
 class Sequence(Brick):
