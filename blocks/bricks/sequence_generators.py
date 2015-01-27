@@ -4,13 +4,13 @@ from abc import ABCMeta, abstractmethod
 from six import add_metaclass
 from theano import tensor
 
-from blocks.bricks import (application, Brick, Initializable, Identity, lazy,
-                           MLP, Random)
+from blocks.bricks import Initializable, Identity, MLP, Random
+from blocks.bricks.base import application, Brick, lazy
 from blocks.bricks.recurrent import BaseRecurrent
 from blocks.bricks.parallel import Fork, Mixer
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.recurrent import recurrent
-from blocks.utils import dict_subset, dict_union, update_instance
+from blocks.utils import dict_subset, dict_union
 
 
 class BaseSequenceGenerator(Initializable):
@@ -95,7 +95,9 @@ class BaseSequenceGenerator(Initializable):
     @lazy
     def __init__(self, readout, transition, fork=None, **kwargs):
         super(BaseSequenceGenerator, self).__init__(**kwargs)
-        update_instance(self, locals())
+        self.readout = readout
+        self.transition = transition
+        self.fork = fork
 
         self.state_names = transition.compute_states.outputs
         self.context_names = transition.apply.contexts
@@ -116,14 +118,15 @@ class BaseSequenceGenerator(Initializable):
 
         # Configure fork
         feedback_names = self.readout.feedback.outputs
-        assert len(feedback_names) == 1
+        if not len(feedback_names) == 1:
+            raise ValueError
         self.fork.input_dim = self.readout.get_dim(feedback_names[0])
         self.fork.fork_dims = {
             name: self.transition.get_dim(name)
             for name in self.fork.apply.outputs}
 
     @application
-    def cost(self, outputs, mask=None, **kwargs):
+    def cost(self, application_call, outputs, mask=None, **kwargs):
         """Returns generation costs for output sequences.
 
         Parameters
@@ -168,11 +171,11 @@ class BaseSequenceGenerator(Initializable):
             feedback=feedback, **dict_union(states, glimpses, contexts))
         costs = self.readout.cost(readouts, outputs)
 
+        for name, variable in glimpses.items():
+            application_call.add_auxiliary_variable(
+                variable.copy(), name=name)
+
         # In case the user needs some glimpses or states or smth else
-        also_return = kwargs.get("also_return")
-        if also_return:
-            others = {name: results[name] for name in also_return}
-            return (costs, others)
         return costs
 
     @recurrent
@@ -358,12 +361,14 @@ class Readout(AbstractReadout):
     def __init__(self, readout_dim=None, emitter=None, feedbacker=None,
                  **kwargs):
         super(Readout, self).__init__(**kwargs)
+        self.readout_dim = readout_dim
 
         if not emitter:
             emitter = TrivialEmitter(readout_dim)
         if not feedbacker:
             feedbacker = TrivialFeedback(readout_dim)
-        update_instance(self, locals())
+        self.emitter = emitter
+        self.feedbacker = feedbacker
 
         self.children = [self.emitter, self.feedbacker]
 
@@ -419,7 +424,8 @@ class LinearReadout(Readout, Initializable):
     @lazy
     def __init__(self, readout_dim, source_names, **kwargs):
         super(LinearReadout, self).__init__(readout_dim, **kwargs)
-        update_instance(self, locals())
+        self.readout_dim = readout_dim
+        self.source_names = source_names
 
         self.projectors = [MLP(name="project_{}".format(name),
                                activations=[Identity()])
@@ -544,7 +550,8 @@ class LookupFeedback(AbstractFeedback, Initializable):
     """
     def __init__(self, num_outputs=None, feedback_dim=None, **kwargs):
         super(LookupFeedback, self).__init__(**kwargs)
-        update_instance(self, locals())
+        self.num_outputs = num_outputs
+        self.feedback_dim = feedback_dim
 
         self.lookup = LookupTable(num_outputs, feedback_dim,
                                   weights_init=self.weights_init)
@@ -555,7 +562,7 @@ class LookupFeedback(AbstractFeedback, Initializable):
         self.lookup.dim = self.feedback_dim
 
     @application
-    def feedback(self, outputs, **kwargs):
+    def feedback(self, outputs):
         assert self.output_dim == 0
         return self.lookup.lookup(outputs)
 
@@ -598,16 +605,21 @@ class AttentionTransition(AbstractAttentionTransition, Initializable):
                  attended_name=None, attended_mask_name=None,
                  **kwargs):
         super(AttentionTransition, self).__init__(**kwargs)
-        update_instance(self, locals())
+        self.transition = transition
+        self.attention = attention
+        self.mixer = mixer
 
         self.sequence_names = self.transition.apply.sequences
         self.state_names = self.transition.apply.states
         self.context_names = self.transition.apply.contexts
 
-        if not self.attended_name:
-            self.attended_name = self.context_names[0]
-        if not self.attended_mask_name:
-            self.attended_mask_name = self.context_names[1]
+        if not attended_name:
+            attended_name = self.context_names[0]
+        if not attended_mask_name:
+            attended_mask_name = self.context_names[1]
+        self.attended_name = attended_name
+        self.attended_mask_name = attended_mask_name
+
         self.preprocessed_attended_name = "preprocessed_" + self.attended_name
 
         self.glimpse_names = self.attention.take_look.outputs
@@ -752,11 +764,8 @@ class AttentionTransition(AbstractAttentionTransition, Initializable):
 
     @apply.delegate
     def apply_delegate(self):
-        # I can write self.apply because it can be overriden.
-        # Thus I have to hack.
-        # TODO: nice interface for this trick.
-        AttentionTransition.do_apply.__get__(self, None)
-        return AttentionTransition.do_apply
+        # TODO: Nice interface for this trick?
+        return self.do_apply.__get__(self, None)
 
     @application
     def initial_state(self, state_name, batch_size, **kwargs):
@@ -782,7 +791,7 @@ class FakeAttentionTransition(AbstractAttentionTransition, Initializable):
     """
     def __init__(self, transition, **kwargs):
         super(FakeAttentionTransition, self).__init__(**kwargs)
-        update_instance(self, locals())
+        self.transition = transition
 
         self.state_names = transition.apply.states
         self.context_names = transition.apply.contexts

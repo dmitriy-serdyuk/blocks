@@ -3,9 +3,10 @@ from abc import ABCMeta, abstractmethod
 
 import numpy
 import six
+import theano
 from six import add_metaclass
 
-from blocks.utils import update_instance
+from blocks.utils import LambdaIterator, SequenceIterator
 
 
 @add_metaclass(ABCMeta)
@@ -25,7 +26,13 @@ class Dataset(object):
     Attributes
     ----------
     sources : tuple of strings
-        The sources this dataset can provide.
+        The sources this dataset will when queried for data e.g.
+        ``('features',)`` when querying only the data from MNIST.
+    provides_sources : tuple of strings
+        The sources this dataset *is able to* provide e.g. ``('features',
+        'targets')`` for MNIST (regardless of which data the data stream
+        actually requests). Any implementation of a dataset should set this
+        attribute on the class (or at least before calling ``super``).
     default_iteration_scheme : :class:`IterationScheme`, optional
         The default iteration scheme that will be used by
         :meth:`get_default_stream` to create a data stream without needing
@@ -39,11 +46,24 @@ class Dataset(object):
     simultaneously.
 
     """
+    provides_sources = None
+
     def __init__(self, sources=None):
         if sources is not None:
-            if not all(source in self.sources for source in sources):
-                raise ValueError("Unable to provide requested sources")
+            if not sources or not all(source in self.provides_sources
+                                      for source in sources):
+                raise ValueError("unable to provide requested sources")
             self.sources = sources
+
+    @property
+    def sources(self):
+        if not hasattr(self, '_sources'):
+            return self.provides_sources
+        return self._sources
+
+    @sources.setter
+    def sources(self, sources):
+        self._sources = sources
 
     def open(self):
         """Return the state if the dataset requires one.
@@ -130,6 +150,37 @@ class Dataset(object):
             raise ValueError("Dataset does not provide a default iterator")
         return DataStream(self, iteration_scheme=self.default_scheme)
 
+    def filter_sources(self, data):
+        """Filter the requested sources from those provided by the dataset.
+
+        A dataset can be asked to provide only a subset of the sources it
+        can provide (e.g. asking MNIST only for the features, not for the
+        labels). A dataset can choose to use this information to e.g. only
+        load the requested sources into memory. However, in case the
+        performance gain of doing so would be negligible, the dataset can
+        load all the data sources and then use this method to return only
+        those requested.
+
+        Parameters
+        ----------
+        data : tuple of objects
+            The data from all the sources i.e. should be of the same length
+            as :attr:`provides_sources`.
+
+        Examples
+        --------
+        >>> class Random(Dataset):
+        ...     provides_sources = ('features', 'targets')
+        ...     def get_data(self, state=None, request=None):
+        ...         data = (numpy.random.rand(10), numpy.random.randn(3))
+        ...         return self.filter_sources(data)
+        >>> Random(sources=('targets',)).get_data() # doctest: +SKIP
+        (array([-1.82436737,  0.08265948,  0.63206168]),)
+
+        """
+        return tuple([d for d, s in zip(data, self.provides_sources)
+                      if s in self.sources])
+
 
 class InMemoryDataset(Dataset):
     """Datasets who hold all of their data in memory.
@@ -155,14 +206,14 @@ class InMemoryDataset(Dataset):
     files are loaded after de-serialization, before the :meth:`load` method
     is ever called.
 
-    >>> import pickle
+    >>> import dill
     >>> from blocks.datasets.mnist import MNIST
     >>> mnist = MNIST('train')
     >>> print("{:,d} KB".format(
-    ...     mnist.data['features'].nbytes / 1024)) # doctest: +SKIP
+    ...     mnist.features.nbytes / 1024)) # doctest: +SKIP
     183,750 KB
     >>> with open('mnist.pkl', 'wb') as f:
-    ...     pickle.dump(mnist, f, protocol=pickle.HIGHEST_PROTOCOL)
+    ...     dill.dump(mnist, f)
 
     You will notice that the dumping of the dataset was relatively quick,
     because it didn't attempt to write MNIST to disk. We can now reload it,
@@ -170,8 +221,8 @@ class InMemoryDataset(Dataset):
     happened.
 
     >>> with open('mnist.pkl', 'rb') as f:
-    ...     mnist = pickle.load(f)
-    >>> print(mnist.data['features'].shape)
+    ...     mnist = dill.load(f)
+    >>> print(mnist.features.shape)
     (60000, 784)
 
     However, if the data files can't be found on disk, accessing the data
@@ -181,8 +232,8 @@ class InMemoryDataset(Dataset):
     >>> correct_path = config.data_path
     >>> config.data_path = '/non/existing/path'
     >>> with open('mnist.pkl', 'rb') as f:
-    ...     mnist = pickle.load(f)
-    >>> print(mnist.data['features'].shape) # doctest: +SKIP
+    ...     mnist = dill.load(f)
+    >>> print(mnist.features.shape) # doctest: +SKIP
     Traceback (most recent call last):
       ...
     FileNotFoundError: [Errno 2] No such file or directory: ...
@@ -191,7 +242,7 @@ class InMemoryDataset(Dataset):
     dataset, correct the situation, and then continue.
 
     >>> config.data_path = correct_path
-    >>> print(mnist.data['features'].shape)
+    >>> print(mnist.features.shape)
     (60000, 784)
 
     .. doctest::
@@ -292,13 +343,13 @@ class ContainerDataset(Dataset):
     Parameters
     ----------
     container : iterable
-        The container to provide interface to. The container's
-        `__iter__` method should return a new iterator over the
-        container. If the container given is an instance of `dict`
-        or `OrderedDict`, its values are interpreted as data channels and
-        its keys are used as source names. Note, that only if
-        the container is an OrderedDict is the order of elements
-        in the returned tuples determined.
+        The container to provide interface to. The container's `__iter__`
+        method should return a new iterator over the container. If the
+        container given is an instance of `dict` or `OrderedDict`, its
+        values are interpreted as data channels and its keys are used as
+        source names. Note, that only if the container is an OrderedDict
+        the order of elements in the returned tuples is determined. If the
+        iterable is not a dictionary, the source ``'data'`` will be used.
 
     .. todo::
 
@@ -309,22 +360,24 @@ class ContainerDataset(Dataset):
 
     def __init__(self, container, sources=None):
         if isinstance(container, dict):
-            self.sources = (sources if sources is not None
-                            else tuple(container.keys()))
+            self.provides_sources = (sources if sources is not None
+                                     else tuple(container.keys()))
             self.data_channels = [container[source] for source in self.sources]
         else:
-            self.sources = ('data',)
-            assert sources == self.sources or sources is None
+            self.provides_sources = ('data',)
+            if not (sources == self.sources or sources is None):
+                raise ValueError
             self.data_channels = [container]
 
     def open(self):
-        iterators = [iter(channel) for channel in self.data_channels]
-        while True:
-            yield tuple([next(iterator) for iterator in iterators])
+        iterators = [SequenceIterator(channel)
+                     for channel in self.data_channels]
+        return LambdaIterator(
+            lambda: tuple([next(iterator) for iterator in iterators]))
 
-    def get_data(self, state, request=None):
-        if request is not None:
-            raise ValueError("Does not accept requests; only next")
+    def get_data(self, state=None, request=None):
+        if state is None or request is not None:
+            raise ValueError
         return next(state)
 
 
@@ -430,7 +483,13 @@ class DataStream(AbstractDataStream):
 
     @property
     def sources(self):
+        if hasattr(self, '_sources'):
+            return self._sources
         return self.dataset.sources
+
+    @sources.setter
+    def sources(self, value):
+        self._sources = value
 
     def close(self):
         self.data_state = self.dataset.close(self.data_state)
@@ -457,14 +516,30 @@ class DataStream(AbstractDataStream):
 
 @add_metaclass(ABCMeta)
 class DataStreamWrapper(AbstractDataStream):
-    """A data stream that wraps another data stream."""
+    """A data stream that wraps another data stream.
+
+    Attributes
+    ----------
+    child_epoch_iterator : iterator type
+        When a new epoch iterator is requested, a new epoch creator is
+        automatically requested from the wrapped data stream and stored in
+        this attribute. Use it to access data from the wrapped data stream
+        by calling ``next(self.child_epoch_iterator)``.
+
+    """
     def __init__(self, data_stream, **kwargs):
         super(DataStreamWrapper, self).__init__(**kwargs)
         self.data_stream = data_stream
 
     @property
     def sources(self):
+        if hasattr(self, '_sources'):
+            return self._sources
         return self.data_stream.sources
+
+    @sources.setter
+    def sources(self, value):
+        self._sources = value
 
     def close(self):
         self.data_stream.close()
@@ -491,13 +566,37 @@ class DataStreamWrapper(AbstractDataStream):
 
 
 class DataStreamMapping(DataStreamWrapper):
-    """Applies a mapping to the data of the wrapped data stream."""
-    def __init__(self, data_stream, mapping):
+    """Applies a mapping to the data of the wrapped data stream.
+
+    Parameters
+    ----------
+    data_stream : instance of :class:`DataStream`
+        The wrapped data stream.
+    mapping : callable
+        The mapping to be applied.
+    add_sources : tuple of str, optional
+        When given, the data produced by the mapping is added to original
+        data under source names `add_sources`.
+
+    """
+    def __init__(self, data_stream, mapping, add_sources=None):
         super(DataStreamMapping, self).__init__(data_stream)
         self.mapping = mapping
+        self.add_sources = add_sources
 
-    def get_data(self):
-        return self.mapping(next(self.child_epoch_iterator))
+    @property
+    def sources(self):
+        return self.data_stream.sources + (self.add_sources
+                                           if self.add_sources else ())
+
+    def get_data(self, request=None):
+        if request is not None:
+            raise ValueError
+        data = next(self.child_epoch_iterator)
+        image = self.mapping(data)
+        if not self.add_sources:
+            return image
+        return data + image
 
 
 class CachedDataStream(DataStreamWrapper):
@@ -514,14 +613,23 @@ class CachedDataStream(DataStreamWrapper):
         which must necessarily be smaller than the child data stream i.e.
         the batches returned must be smaller than the cache size.
 
+    Attributes
+    ----------
+    cache : list of lists of objects
+        This attribute holds the cache at any given point. It is a list of
+        the same size as the :attr:`sources` attribute. Each element in
+        this list in its turn a list of examples that are currently in the
+        cache. The cache gets emptied at the start of each epoch, and gets
+        refilled when needed through the :meth:`get_data` method.
+
     """
     def __init__(self, data_stream, iteration_scheme):
         super(CachedDataStream, self).__init__(
-            data_stream, iteration_sheme=iteration_scheme)
-        self.cache = [[] for source in self.sources]
+            data_stream, iteration_scheme=iteration_scheme)
+        self.cache = [[] for _ in self.sources]
 
-    def get_data(self, request):
-        if request >= len(self.cache[0]):
+    def get_data(self, request=None):
+        if request > len(self.cache[0]):
             self._cache()
         data = []
         for i, cache in enumerate(self.cache):
@@ -529,9 +637,131 @@ class CachedDataStream(DataStreamWrapper):
             self.cache[i] = cache[request:]
         return tuple(data)
 
+    def get_epoch_iterator(self, **kwargs):
+        self.cache = [[] for _ in self.sources]
+        return super(CachedDataStream, self).get_epoch_iterator(**kwargs)
+
     def _cache(self):
         for cache, data in zip(self.cache, next(self.child_epoch_iterator)):
             cache.extend(data)
+
+
+class BatchDataStream(DataStreamWrapper):
+    """Creates minibatches from data streams providing single examples.
+
+    Some datasets only return one example at at time e.g. when reading text
+    files a line at a time. This wrapper reads several examples
+    sequentially to turn those into minibatches.
+
+    Parameters
+    ----------
+    data_stream : :class:`AbstractDataStream` instance
+        The data stream to wrap.
+    iteration_scheme : :class:`BatchSizeScheme` instance
+        The iteration scheme to use; should return integers representing
+        the size of the batch to return.
+    strict : bool, optional
+        Whether the batch size should be strictly adhered to or not. For
+        example, if the dataset ends before the last batch is being filled,
+        can a smaller batch still be returned? By default ``False``.
+
+    """
+    def __init__(self, data_stream, iteration_scheme, strict=False):
+        super(BatchDataStream, self).__init__(
+            data_stream, iteration_scheme=iteration_scheme)
+        self.strict = strict
+
+    def get_data(self, request=None):
+        """Get data from the dataset."""
+        if request is None:
+            raise ValueError
+        data = [[] for _ in self.sources]
+        for i in range(request):
+            try:
+                for source_data, example in zip(
+                        data, next(self.child_epoch_iterator)):
+                    source_data.append(example)
+            except StopIteration:
+                if self.strict and data[0]:
+                    raise ValueError("Not enough examples to form a batch of"
+                                     " requested size")
+                # If some data has been extracted and `strict` is not set,
+                # we should spit out this data before stopping iteration.
+                if data[0]:
+                    break
+                raise
+        return tuple(numpy.asarray(source_data) for source_data in data)
+
+
+class PaddingDataStream(DataStreamWrapper):
+    """Adds padding to variable-length sequences.
+
+    When your batches consist of variable-length sequences, use this class
+    to equalize lengthes by adding zero-padding. To distinguish between
+    data and padding masks can be produced. For each data source that is
+    masked, a new source will be added. This source will have the name of
+    the original source with the suffix ``_mask`` (e.g. ``features_mask``).
+
+    Elements of incoming batches will be treated as numpy arrays (i.e.
+    using `numpy.asarray`). If they have more than one dimension,
+    all dimensions except length, that is the first one, must be equal.
+
+    Parameters
+    ----------
+    data_stream : :class:`AbstractDataStream` instance
+        The data stream to wrap
+    mask_sources : tuple of strings, optional
+        The sources for which we need to add a mask. If not provided, a
+        mask will be created for all data sources
+
+    """
+    def __init__(self, data_stream, mask_sources=None):
+        super(PaddingDataStream, self).__init__(data_stream)
+        if mask_sources is None:
+            mask_sources = self.data_stream.sources
+        self.mask_sources = mask_sources
+
+    @property
+    def sources(self):
+        sources = []
+        for source in self.data_stream.sources:
+            sources.append(source)
+            if source in self.mask_sources:
+                sources.append(source + '_mask')
+        return tuple(sources)
+
+    def get_data(self, request=None):
+        if request is not None:
+            raise ValueError
+        data = list(next(self.child_epoch_iterator))
+        data_with_masks = []
+        for i, (source, source_data) in enumerate(
+                zip(self.data_stream.sources, data)):
+            if source not in self.mask_sources:
+                data_with_masks.append(source_data)
+                continue
+
+            shapes = [numpy.asarray(sample).shape for sample in source_data]
+            lengthes = [shape[0] for shape in shapes]
+            max_sequence_length = max(lengthes)
+            rest_shape = shapes[0][1:]
+            if not all([shape[1:] == rest_shape for shape in shapes]):
+                raise ValueError("All dimensions except length must be equal")
+            dtype = numpy.asarray(source_data[0]).dtype
+
+            padded_data = numpy.zeros(
+                (len(source_data), max_sequence_length) + rest_shape,
+                dtype=dtype)
+            for i, sample in enumerate(source_data):
+                padded_data[i, :len(sample)] = sample
+            data_with_masks.append(padded_data)
+
+            mask = numpy.zeros((len(source_data), max_sequence_length),
+                               dtype=theano.config.floatX)
+            for i, sequence_length in enumerate(lengthes):
+                mask[i, :sequence_length] = 1
+            data_with_masks.append(mask)
+        return tuple(data_with_masks)
 
 
 class DataIterator(six.Iterator):
@@ -547,7 +777,9 @@ class DataIterator(six.Iterator):
 
     """
     def __init__(self, data_stream, request_iterator=None, as_dict=False):
-        update_instance(self, locals())
+        self.data_stream = data_stream
+        self.request_iterator = request_iterator
+        self.as_dict = as_dict
 
     def __iter__(self):
         return self

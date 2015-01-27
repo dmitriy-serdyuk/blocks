@@ -13,12 +13,37 @@ class TrainingExtension(object):
     typically add a certain functionality to the training procedure,
     e.g. running validation on auxiliarry datasets or early stopping.
 
+    Parameters
+    ----------
+    name : str, optional
+        The name of the extension. The names are useful in order to
+        distinguish between several extensions of the same type that
+        belongs to the same main loop. By default the name is set to
+        the name of the class.
+
     Attributes
     ----------
     main_loop : :class:`MainLoop`
         The main loop to which the extension belongs.
+    name : str
+        The name of the extension.
 
     """
+    def __init__(self, name=None):
+        if not name:
+            name = self.__class__.__name__
+        self.name = name
+
+    @property
+    def main_loop(self):
+        if not hasattr(self, '_main_loop'):
+            raise ValueError("main loop must be assigned to extension first")
+        return self._main_loop
+
+    @main_loop.setter
+    def main_loop(self, value):
+        self._main_loop = value
+
     def dispatch(self, callback_name, *args):
         """Runs callback with the given name.
 
@@ -30,6 +55,9 @@ class TrainingExtension(object):
 
         """
         getattr(self, callback_name)(*args)
+
+    def on_resumption(self):
+        """The callback invoked after training is resumed."""
 
     def before_training(self):
         """The callback invoked before training is started."""
@@ -88,38 +116,60 @@ class SimpleExtension(TrainingExtension):
 
     Parameters
     ----------
+    before_training : bool
+        If ``True``, :meth:`do` is invoked before training.
     before_first_epoch : bool
         If ``True``, :meth:`do` is invoked before the first epoch.
+    on_resumption : bool, optional
+        If ``True``, :meth:`do` is invoked when training is resumed.
+    on_interrupt : bool, optional
+        If ``True``, :meth:`do` is invoked when training is interrupted.
     after_every_epoch : bool
         If ``True``, :meth:`do` is invoked after every epoch.
-    after_every_iteration : bool
-        If ``True``, :meth:`do` is invoked after every iteration.
+    after_every_batch: bool
+        If ``True``, :meth:`do` is invoked after every batch.
     after_training : bool
         If ``True``, :meth:`do` is invoked after training.
     after_n_epochs : int, optional
-        If not ``None``, :meth:`do` is invoked when `after_n_epochs` are
-        done.
+        If not ``None``, :meth:`do` is invoked when `after_n_epochs`
+        epochs are done.
+    after_n_batches : int, optional
+        If not ``None``, :meth:`do` is invoked when `after_n_batches`
+        batches are processed.
+    every_n_batches : int, optional
+        If not ``None``, :meth:`do` is invoked after every n-th batch.
 
     """
-    def __init__(self, before_first_epoch=False, after_every_epoch=False,
-                 after_every_iteration=False, after_training=False,
-                 after_n_epochs=None):
+    def __init__(self, before_training=False, before_first_epoch=False,
+                 on_resumption=False, on_interrupt=False,
+                 after_every_epoch=False, after_every_batch=False,
+                 after_training=False,
+                 after_n_epochs=None, after_n_batches=None,
+                 every_n_batches=None, **kwargs):
+        super(SimpleExtension, self).__init__(**kwargs)
         self._conditions = []
+        if before_training:
+            self.add_condition("before_training")
         if before_first_epoch:
             self.add_condition(
                 "before_epoch",
                 predicate=lambda log: log.status.epochs_done == 0)
+        if on_resumption:
+            self.add_condition("on_resumption")
+        if on_interrupt:
+            self.add_condition("on_interrupt")
         if after_every_epoch:
             self.add_condition("after_epoch")
-        if after_every_iteration:
-            self.add_condition("after_iteration")
+        if after_every_batch:
+            self.add_condition("after_batch")
         if after_training:
             self.add_condition("after_training")
         if after_n_epochs:
-            self.add_condition(
-                "after_epoch",
-                predicate=lambda log:
-                    log.status.epochs_done == after_n_epochs)
+            self.invoke_after_n_epochs(after_n_epochs)
+        if after_n_batches:
+            self.invoke_after_n_batches(after_n_batches)
+        if every_n_batches:
+            self.invoke_every_n_batches(every_n_batches)
 
     def add_condition(self, callback_name, predicate=None, arguments=None):
         """Adds a condition under which a :meth:`do` is called.
@@ -138,12 +188,35 @@ class SimpleExtension(TrainingExtension):
             be concatenated with the ones passed from the main loop
             (e.g. the batch in case of `after_epoch` callback).
 
+        Returns
+        -------
+            The extension object (allow chaining calls)
+
         """
         if not arguments:
             arguments = []
         if not predicate:
             predicate = lambda log: True
         self._conditions.append((callback_name, predicate, arguments))
+        return self
+
+    def invoke_after_n_epochs(self, n_epochs):
+        self.add_condition(
+            "after_epoch",
+            predicate=lambda log:
+                log.status.epochs_done == n_epochs)
+
+    def invoke_after_n_batches(self, n_batches):
+        self.add_condition(
+            "after_batch",
+            predicate=lambda log:
+                log.status.iterations_done == n_batches)
+
+    def invoke_every_n_batches(self, n_batches):
+        self.add_condition(
+            "after_batch",
+            predicate=lambda log:
+                log.status.iterations_done % n_batches == 0)
 
     @abstractmethod
     def do(self, which_callback, *args):
@@ -183,38 +256,47 @@ class FinishAfter(SimpleExtension):
     def __init__(self, **kwargs):
         super(FinishAfter, self).__init__(**kwargs)
 
-    def do(self, which_callback):
+    def do(self, which_callback, *args):
         self.main_loop.log.current_row.training_finish_requested = True
 
 
 class Printing(SimpleExtension):
     """Prints log messages to the screen."""
     def __init__(self, **kwargs):
-        def set_if_absent(name):
-            if name not in kwargs:
-                kwargs[name] = True
-        set_if_absent("before_first_epoch")
-        set_if_absent("after_training")
-        set_if_absent("after_every_epoch")
+        kwargs.setdefault("before_first_epoch", True)
+        kwargs.setdefault("on_resumption", True)
+        kwargs.setdefault("after_training", True)
+        kwargs.setdefault("after_every_epoch", True)
+        kwargs.setdefault("on_interrupt", True)
         super(Printing, self).__init__(**kwargs)
 
     def _print_attributes(self, attribute_tuples):
-        for attr, value in attribute_tuples:
+        for attr, value in sorted(attribute_tuples, key=lambda t: t[0]):
             if not attr.startswith("_"):
                 print("\t", "{}:".format(attr), value)
 
-    def do(self, which_callback):
+    def do(self, which_callback, *args):
         log = self.main_loop.log
+        print_status = True
+
+        print()
         print("".join(79 * "-"))
         if which_callback == "before_epoch" and log.status.epochs_done == 0:
             print("BEFORE FIRST EPOCH")
+        elif which_callback == "on_resumption":
+            print("TRAINING HAS BEEN RESUMED")
         elif which_callback == "after_training":
             print("TRAINING HAS BEEN FINISHED:")
         elif which_callback == "after_epoch":
             print("AFTER ANOTHER EPOCH")
+        elif which_callback == "on_interrupt":
+            print("TRAINING HAS BEEN INTERRUPTED")
+            print_status = False
         print("".join(79 * "-"))
-        print("Training status:")
-        self._print_attributes(log.status)
-        print("Log records from the iteration {}:".format(
-            log.status.iterations_done))
-        self._print_attributes(log.current_row)
+        if print_status:
+            print("Training status:")
+            self._print_attributes(log.status)
+            print("Log records from the iteration {}:".format(
+                log.status.iterations_done))
+            self._print_attributes(log.current_row)
+        print()

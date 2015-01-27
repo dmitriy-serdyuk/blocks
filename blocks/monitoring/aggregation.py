@@ -3,8 +3,9 @@ import logging
 from abc import ABCMeta, abstractmethod
 
 from six import add_metaclass
+from theano import tensor
 
-from blocks.utils import shared_like, update_instance
+from blocks.utils import shared_like
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +77,15 @@ class Aggregator(object):
     """
     def __init__(self, aggregation_scheme, initialization_updates=None,
                  accumulation_updates=None, readout_expression=None):
+        self.aggregation_scheme = aggregation_scheme
+        self.readout_expression = readout_expression
+
         if initialization_updates is None:
             initialization_updates = []
         if accumulation_updates is None:
             accumulation_updates = []
-        update_instance(self, locals())
+        self.initialization_updates = initialization_updates
+        self.accumulation_updates = accumulation_updates
 
 
 class Mean(AggregationScheme):
@@ -115,20 +120,35 @@ class Mean(AggregationScheme):
         return aggregator
 
 
-def mean(numerator, denominator):
+def mean(numerator, denominator=1.0):
     """Mean of quantity (numerator) over a number (denominator) values."""
     expression = numerator / denominator
     expression.tag.aggregation_scheme = Mean(numerator, denominator)
+    expression.name = numerator.name
     return expression
 
 
 class _DataIndependent(AggregationScheme):
     """Dummy aggregation scheme for values that don't depend on data."""
     def __init__(self, variable):
-        update_instance(self, locals())
+        self.variable = variable
 
     def get_aggregator(self):
         return Aggregator(aggregation_scheme=self,
                           initialization_updates=[],
                           accumulation_updates=[],
                           readout_expression=self.variable)
+
+
+class TakeLast(AggregationScheme):
+    """Aggregation scheme which remembers only the last value."""
+    def __init__(self, variable):
+        self.variable = variable
+
+    def get_aggregator(self):
+        self.storage = shared_like(self.variable)
+        return Aggregator(aggregation_scheme=self,
+                          initialization_updates=[
+                              (self.storage, tensor.zeros_like(self.storage))],
+                          accumulation_updates=[(self.storage, self.variable)],
+                          readout_expression=self.storage)

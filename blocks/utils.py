@@ -1,13 +1,13 @@
 import sys
-from collections import OrderedDict
+from collections import OrderedDict, Sequence
 
 import numpy
 import six
 import theano
 from theano import tensor
 from theano import printing
-from theano.scalar import ScalarConstant
-from theano.tensor import TensorConstant
+from theano.gof.graph import Constant
+from theano.tensor.shared_randomstreams import RandomStateSharedVariable
 from theano.tensor.sharedvar import SharedVariable
 
 
@@ -223,6 +223,13 @@ def check_theano_variable(variable, n_dim, dtype_prefix):
                              dtype_prefix, variable.dtype))
 
 
+def named_copy(variable, new_name):
+    """Clones a variable and set a new name to the clone."""
+    result = variable.copy()
+    result.name = new_name
+    return result
+
+
 def is_graph_input(variable):
     """Check if variable is a user-provided graph input.
 
@@ -241,37 +248,19 @@ def is_graph_input(variable):
     """
     return (not variable.owner and
             not isinstance(variable, SharedVariable) and
-            not isinstance(variable, TensorConstant) and
-            not isinstance(variable, ScalarConstant))
+            not isinstance(variable, Constant))
 
 
 def is_shared_variable(variable):
-    """Check if a variable is a Theano shared variable."""
-    return isinstance(variable, SharedVariable)
+    """Check if a variable is a Theano shared variable.
 
-
-def graph_inputs(variables, blockers=None):
-    """Compute inputs needed to compute values in variables.
-
-    This function is similar to :meth:`theano.gof.graph.inputs`. However,
-    it doesn't treat shared and constant values as inputs.
-
-    Parameters
-    ----------
-    variables : list of theano variables
-        The outputs whose inputs are sought for.
-    blockers : list of theano variables
-        See :meth:`theano.gof.graph.inputs` for documentation.
-
-    Returns
-    -------
-    list
-        Theano variables which are non-constant and non-shared inputs to
-        the computational graph.
+    Notes
+    -----
+    This function excludes random shared variables.
 
     """
-    inps = theano.gof.graph.inputs(variables, blockers=blockers)
-    return [i for i in inps if is_graph_input(i)]
+    return (isinstance(variable, SharedVariable) and
+            not isinstance(variable, RandomStateSharedVariable))
 
 
 def dict_subset(dict_, keys, pop=False, must_have=True):
@@ -377,27 +366,8 @@ def repr_attrs(instance, *attrs):
     orig_repr_template += '>'
     try:
         return repr_template.format(instance, id(instance))
-    except:
+    except Exception:
         return orig_repr_template.format(instance, id(instance))
-
-
-def update_instance(self, kwargs, ignore=True):
-    """Set attributes of an instance from a dictionary.
-
-    Parameters
-    ----------
-    self : object
-        The instance on which to set the attributes and values given.
-    kwargs : dict
-        A dictionary with attributes and their values as keys and values.
-    ignore : bool
-        If ``True`` then ignore the keys ``self``, ``args`` and ``kwargs``.
-        Is ``True`` by default.
-
-    """
-    for key, value in kwargs.items():
-        if ignore and key not in ['self', 'args', 'kwargs', '__class__']:
-            setattr(self, key, value)
 
 
 def put_hook(variable, hook_fn):
@@ -429,3 +399,53 @@ def ipdb_breakpoint(x):
     """
     import ipdb
     ipdb.set_trace()
+
+
+class LambdaIterator(six.Iterator):
+    """An iterator that calls a function to fetch the next element.
+
+    The reason for having this is that generators are not serializable
+    in Python (even when using third-party libraries).
+
+    Parameters
+    ----------
+    next_function : callable
+        A function to call every time the next element is requested.
+
+    """
+    def __init__(self, next_function):
+        self.next_function = next_function
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next_function()
+
+
+class SequenceIterator(six.Iterator):
+    """A serializable iterator for list and tuple.
+
+    The reason for having this is that list iterators are not serializable
+    in Python (even when using third-party libraries).
+
+    Parameters
+    ----------
+    sequence : list or tuple
+        The sequence to iterate over.
+
+    """
+    def __init__(self, sequence):
+        assert isinstance(sequence, Sequence)
+        self.sequence = sequence
+        self._offset = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._offset == len(self.sequence):
+            raise StopIteration()
+        result = self.sequence[self._offset]
+        self._offset += 1
+        return result

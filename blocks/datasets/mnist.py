@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import struct
 
@@ -7,16 +8,22 @@ import theano
 from blocks import config
 from blocks.datasets import InMemoryDataset, lazy_properties
 from blocks.datasets.schemes import SequentialScheme
-from blocks.utils import update_instance
-
-
 MNIST_IMAGE_MAGIC = 2051
 MNIST_LABEL_MAGIC = 2049
 
 
-@lazy_properties('data')
+@lazy_properties('features', 'targets')
 class MNIST(InMemoryDataset):
-    """The MNIST dataset of handwritten digits.
+    u"""The MNIST dataset of handwritten digits.
+
+    MNIST (Mixed National Institute of Standards and Technology) [LBBH] is
+    a database of handwritten digits. It is one of the most famous datasets
+    in machine learning and consists of 60,000 training images and 10,000
+    testing images. The images are grayscale and 28 x 28 pixels large.
+
+    .. [LBBH] Yann LeCun, Léon Bottou, Yoshu Bengio, and Patrick Haffner,
+       *Gradient-based learning applied to document recognition*,
+       Proceedings of the IEEE, November 1998, 86(11):2278-2324.
 
     .. todo::
 
@@ -47,16 +54,24 @@ class MNIST(InMemoryDataset):
         grayscale. ``False`` by default.
 
     """
-    sources = ('features', 'targets')
+    provides_sources = ('features', 'targets')
 
     def __init__(self, which_set, start=None, stop=None, binary=False,
                  **kwargs):
         if which_set not in ('train', 'test'):
             raise ValueError("MNIST only has a train and test set")
-        num_examples = (stop if stop else 60000) - (start if start else 0)
-        default_scheme = SequentialScheme(num_examples, 1)
-        update_instance(self, locals())
+        if not stop:
+            stop = 60000 if which_set == "train" else 10000
+        if not start:
+            start = 0
+        self.num_examples = stop - start
+        self.default_scheme = SequentialScheme(self.num_examples, 1)
         super(MNIST, self).__init__(**kwargs)
+
+        self.which_set = which_set
+        self.start = start
+        self.stop = stop
+        self.binary = binary
 
     def load(self):
         if self.which_set == 'train':
@@ -66,20 +81,22 @@ class MNIST(InMemoryDataset):
             data = 't10k-images-idx3-ubyte'
             labels = 't10k-labels-idx1-ubyte'
         data_path = os.path.join(config.data_path, 'mnist')
-        X = read_mnist_images(
+        x = read_mnist_images(
             os.path.join(data_path, data),
             'bool' if self.binary
             else theano.config.floatX)[self.start:self.stop]
-        X = X.reshape((X.shape[0], numpy.prod(X.shape[1:])))
+        x = x.reshape((x.shape[0], numpy.prod(x.shape[1:])))
         y = read_mnist_labels(
             os.path.join(data_path, labels))[self.start:self.stop,
                                              numpy.newaxis]
-        self.data = {'features': X, 'targets': y}
+        self.features = x
+        self.targets = y
 
     def get_data(self, state=None, request=None):
         if state is not None:
             raise ValueError("MNIST does not have a state")
-        return tuple(self.data[source][request] for source in self.sources)
+        return self.filter_sources((self.features[request],
+                                    self.targets[request]))
 
 
 def read_mnist_images(filename, dtype=None):
@@ -148,7 +165,7 @@ def read_mnist_labels(filename):
 
     """
     with open(filename, 'rb') as f:
-        magic, number = struct.unpack('>ii', f.read(8))
+        magic, _ = struct.unpack('>ii', f.read(8))
         if magic != MNIST_LABEL_MAGIC:
             raise ValueError("Wrong magic number reading MNIST label file")
         array = numpy.fromfile(f, dtype='uint8')
