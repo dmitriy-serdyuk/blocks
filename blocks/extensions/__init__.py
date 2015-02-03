@@ -1,4 +1,5 @@
 from __future__ import print_function
+import time
 
 from abc import ABCMeta, abstractmethod
 
@@ -11,7 +12,7 @@ class TrainingExtension(object):
     An extension is a set of callbacks sharing a joint context that are
     invoked at certain stages of the training procedure. This callbacks
     typically add a certain functionality to the training procedure,
-    e.g. running validation on auxiliarry datasets or early stopping.
+    e.g. running validation on auxiliary datasets or early stopping.
 
     Parameters
     ----------
@@ -23,7 +24,7 @@ class TrainingExtension(object):
 
     Attributes
     ----------
-    main_loop : :class:`MainLoop`
+    main_loop : :class:`.MainLoop`
         The main loop to which the extension belongs.
     name : str
         The name of the extension.
@@ -220,14 +221,14 @@ class SimpleExtension(TrainingExtension):
 
     @abstractmethod
     def do(self, which_callback, *args):
-        """Does the job of the training extension.
+        r"""Does the job of the training extension.
 
         Parameters
         ----------
         which_callback : str
             The name of the callback in the context of which :meth:`do` is
             run.
-        *args : tuple
+        \*args : tuple
             The arguments from the main loop concatenated with additional
             arguments from user.
 
@@ -300,3 +301,100 @@ class Printing(SimpleExtension):
                 log.status.iterations_done))
             self._print_attributes(log.current_row)
         print()
+
+
+class Timing(TrainingExtension):
+    """Keeps track of time used.
+
+    Depending of the `clock_function` parameter this extension
+    can track both CPU or user time.
+
+    It is highly recommended to put this extension first in the extension
+    list. Assuming that this recommendation is respected, the semantics
+    of the records it writes to the log is explained below:
+
+    * `initilialization_took`: number of seconds the initialization took.
+      Includes time spent running `before_training` callbacks.
+
+    * `iteration_took`: number of seconds an iteration took. Includes
+      time spent running `after_batch` callbacks at the previous iteration
+      and `before_batch` callbacks of current iteration
+
+    * `epoch_took`: number of seconds an epoch took. Includes
+      time spent running `after_epoch` callbacks at the previous iteration
+      and `before_epoch` callbacks of current iteration
+
+    * `total_took`: number of seconds running until the current iteration
+      took.
+
+    * `final_total_took`: total number of seconds spent on training
+      including all extension calls except `after_training`.
+
+    Parameters
+    ----------
+    clock_function : callable, optional
+        Return the current time. By default `time.time` is used,
+        which means that user time is tracked.
+
+    Notes
+    -----
+    When training is interrupted this extension saves intermediate
+    time measurements to the training status, i.e. it should be robust
+    to any training interruptions.
+
+
+    """
+    def __init__(self, clock_function=None, **kwargs):
+        super(Timing, self).__init__(**kwargs)
+        if not clock_function:
+            clock_function = time.time
+        self.clock_function = clock_function
+
+    @property
+    def log(self):
+        return self.main_loop.log
+
+    def before_training(self):
+        self.started_at = self.clock_function()
+        self.log.status._epoch_before_interrupted = 0
+        self.log.status._total_before_interrupted = 0
+
+    def before_epoch(self):
+        self.epoch_started_at = self.clock_function()
+        if self.log.status.epochs_done == 0:
+            self.log.current_row.initialization_took = (
+                self.epoch_started_at - self.started_at)
+
+    def before_batch(self, batch):
+        self.batch_started_at = self.clock_function()
+
+    def after_batch(self, batch):
+        self.log.current_row.iteration_took = (
+            self.clock_function() - self.batch_started_at)
+        self.log.current_row.total_took = (
+            self.log.status._total_before_interrupted +
+            self.clock_function() - self.started_at)
+
+    def after_epoch(self):
+        self.log.current_row.epoch_took = (
+            self.log.status._epoch_before_interrupted +
+            self.clock_function() - self.epoch_started_at)
+        self.log.status._epoch_before_interrupted = 0
+
+    def after_training(self):
+        self.log.current_row.final_total_took = (
+            self.log.status._total_before_interrupted +
+            self.clock_function() - self.started_at)
+
+        # Save intermediate results to the log.status
+        self.log.status._total_before_interrupted = (
+            self.log.current_row.final_total_took)
+        if self.log.status._epoch_started:
+            epoch_ends = self.log.status._epoch_ends
+            self.log.status._epoch_before_interrupted = (
+                self.clock_function() -
+                0 if not epoch_ends else self.log[epoch_ends[-1]].total_took)
+
+    def on_resumption(self):
+        self.started_at = self.clock_function()
+        self.epoch_started_at = self.clock_function()

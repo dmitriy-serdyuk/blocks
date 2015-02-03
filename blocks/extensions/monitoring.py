@@ -12,6 +12,8 @@ logger = logging.getLogger()
 def _add_records(log, prefix, record_tuples):
     """Helper function to add monitoring records to the log."""
     for name, value in record_tuples:
+        if not name:
+            raise ValueError("monitor variable without name")
         prefixed_name = prefix + PREFIX_SEPARATOR + name if prefix else name
         setattr(log.current_row, prefixed_name, value)
 
@@ -23,11 +25,11 @@ class DataStreamMonitoring(SimpleExtension):
 
     Parameters
     ----------
-    expressions : list of Theano variables
+    expressions : list of :class:`~tensor.TensorVariable`
         The expressions to monitor. The variable names are used as
         expression names.
-    data_stream : instance of :class:`DataStream`
-        The data stream to monitor on. A data epoch is requsted
+    data_stream : instance of :class:`.DataStream`
+        The data stream to monitor on. A data epoch is requested
         each time monitoring is done.
     prefix : str, optional
         A prefix to add to expression names when adding records to the
@@ -66,7 +68,7 @@ class TrainingDataMonitoring(SimpleExtension):
 
     Parameters
     ----------
-    expressions : list of Theano variables
+    expressions : list of :class:`~tensor.TensorVariable`
         The expressions to monitor. The variable names are used as
         expression names.
     prefix : str, optional
@@ -79,7 +81,7 @@ class TrainingDataMonitoring(SimpleExtension):
     update.
 
     Requires the training algorithm to be an instance of
-    :class:`DifferentiableCostMinimizer`.
+    :class:`.DifferentiableCostMinimizer`.
 
     """
     def __init__(self, expressions, prefix=None, **kwargs):
