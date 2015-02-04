@@ -6,8 +6,8 @@ import six
 import theano
 from theano import tensor
 from theano import printing
-from theano.scalar import ScalarConstant
-from theano.tensor import TensorConstant
+from theano.gof.graph import Constant
+from theano.tensor.shared_randomstreams import RandomStateSharedVariable
 from theano.tensor.sharedvar import SharedVariable
 
 
@@ -77,20 +77,20 @@ def shared_floatx(value, name=None, borrow=False, dtype=None):
 
     Parameters
     ----------
-    value : array_like
+    value : :class:`~numpy.ndarray`
         The value to associate with the Theano shared.
-    name : str, optional
-        The name for the shared varaible. Defaults to `None`.
-    borrow : bool, optional
+    name : :obj:`str`, optional
+        The name for the shared variable. Defaults to `None`.
+    borrow : :obj:`bool`, optional
         If set to True, the given `value` will not be copied if possible.
         This can save memory and speed. Defaults to False.
-    dtype : str, optional
+    dtype : :obj:`str`, optional
         The `dtype` of the shared variable. Default value is
-        `theano.config.floatX`.
+        :attr:`config.floatX`.
 
     Returns
     -------
-    theano.compile.SharedVariable
+    :class:`tensor.TensorSharedVariable`
         A Theano shared variable with the requested value and `dtype`.
 
     """
@@ -101,24 +101,24 @@ def shared_floatx(value, name=None, borrow=False, dtype=None):
                          borrow=borrow)
 
 
-def shared_like(expression, name=None):
-    """Construct a shared variable to hold the results of a theano expression.
+def shared_like(variable, name=None):
+    """Construct a shared variable to hold the value of a tensor variable.
 
     Parameters
     ----------
-    expression : theano variable
-        The expression whose dtype and ndim will be used to construct
+    variable : :class:`~tensor.TensorVariable`
+        The variable whose dtype and ndim will be used to construct
         the new shared variable.
-    name : string or None
+    name : :obj:`str` or :obj:`None`
         The name of the shared variable. If None, the name is determined
-        based on expression's name.
+        based on variable's name.
 
     """
-    expression = tensor.as_tensor_variable(expression)
+    variable = tensor.as_tensor_variable(variable)
     if name is None:
-        name = "shared_{}".format(expression.name)
-    return theano.shared(numpy.zeros((0,) * expression.ndim,
-                                     dtype=expression.dtype),
+        name = "shared_{}".format(variable.name)
+    return theano.shared(numpy.zeros((0,) * variable.ndim,
+                                     dtype=variable.dtype),
                          name=name)
 
 
@@ -130,7 +130,7 @@ def reraise_as(new_exc):
 
     Parameters
     ----------
-    new_exc : Exception isinstance
+    new_exc : :class:`Exception` or :obj:`str`
         The new error to be raised e.g. (ValueError("New message"))
         or a string that will be prepended to the original exception
         message
@@ -197,7 +197,7 @@ def check_theano_variable(variable, n_dim, dtype_prefix):
 
     Parameters
     ----------
-    variable : Theano variable or convertable to one
+    variable : :class:`~tensor.TensorVariable` or convertible to one
         A variable to check.
     n_dim : int
         Expected number of dimensions or None. If None, no check is
@@ -223,6 +223,13 @@ def check_theano_variable(variable, n_dim, dtype_prefix):
                              dtype_prefix, variable.dtype))
 
 
+def named_copy(variable, new_name):
+    """Clones a variable and set a new name to the clone."""
+    result = variable.copy()
+    result.name = new_name
+    return result
+
+
 def is_graph_input(variable):
     """Check if variable is a user-provided graph input.
 
@@ -231,7 +238,7 @@ def is_graph_input(variable):
 
     Parameters
     ----------
-    variable : theano expression
+    variable : :class:`~tensor.TensorVariable`
 
     Returns
     -------
@@ -241,37 +248,19 @@ def is_graph_input(variable):
     """
     return (not variable.owner and
             not isinstance(variable, SharedVariable) and
-            not isinstance(variable, TensorConstant) and
-            not isinstance(variable, ScalarConstant))
+            not isinstance(variable, Constant))
 
 
 def is_shared_variable(variable):
-    """Check if a variable is a Theano shared variable."""
-    return isinstance(variable, SharedVariable)
+    """Check if a variable is a Theano shared variable.
 
-
-def graph_inputs(variables, blockers=None):
-    """Compute inputs needed to compute values in variables.
-
-    This function is similar to :meth:`theano.gof.graph.inputs`. However,
-    it doesn't treat shared and constant values as inputs.
-
-    Parameters
-    ----------
-    variables : list of theano variables
-        The outputs whose inputs are sought for.
-    blockers : list of theano variables
-        See :meth:`theano.gof.graph.inputs` for documentation.
-
-    Returns
-    -------
-    list
-        Theano variables which are non-constant and non-shared inputs to
-        the computational graph.
+    Notes
+    -----
+    This function excludes random shared variables.
 
     """
-    inps = theano.gof.graph.inputs(variables, blockers=blockers)
-    return [i for i in inps if is_graph_input(i)]
+    return (isinstance(variable, SharedVariable) and
+            not isinstance(variable, RandomStateSharedVariable))
 
 
 def dict_subset(dict_, keys, pop=False, must_have=True):
@@ -377,27 +366,8 @@ def repr_attrs(instance, *attrs):
     orig_repr_template += '>'
     try:
         return repr_template.format(instance, id(instance))
-    except:
+    except Exception:
         return orig_repr_template.format(instance, id(instance))
-
-
-def update_instance(self, kwargs, ignore=True):
-    """Set attributes of an instance from a dictionary.
-
-    Parameters
-    ----------
-    self : object
-        The instance on which to set the attributes and values given.
-    kwargs : dict
-        A dictionary with attributes and their values as keys and values.
-    ignore : bool
-        If ``True`` then ignore the keys ``self``, ``args`` and ``kwargs``.
-        Is ``True`` by default.
-
-    """
-    for key, value in kwargs.items():
-        if ignore and key not in ['self', 'args', 'kwargs', '__class__']:
-            setattr(self, key, value)
 
 
 def put_hook(variable, hook_fn):
@@ -408,7 +378,7 @@ def put_hook(variable, hook_fn):
 
     Parameters
     ----------
-    variable : Theano variable
+    variable : :class:`~tensor.TensorVariable`
         The variable to put a hook on.
     hook_fn : function
         The hook function. Should take a single argument: the variable's
@@ -423,9 +393,58 @@ def ipdb_breakpoint(x):
 
     Parameters
     ----------
-    x : :class:`numpy.ndarray`
+    x : :class:`~numpy.ndarray`
         The value of the hooked variable.
 
     """
     import ipdb
     ipdb.set_trace()
+
+
+class LambdaIterator(six.Iterator):
+    """An iterator that calls a function to fetch the next element.
+
+    The reason for having this is that generators are not serializable
+    in Python (even when using third-party libraries).
+
+    Parameters
+    ----------
+    next_function : callable
+        A function to call every time the next element is requested.
+
+    """
+    def __init__(self, next_function):
+        self.next_function = next_function
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next_function()
+
+
+class SequenceIterator(six.Iterator):
+    """A serializable iterator for list and tuple.
+
+    The reason for having this is that list iterators are not serializable
+    in Python (even when using third-party libraries).
+
+    Parameters
+    ----------
+    sequence : :obj:`list` or :obj:`tuple`
+        The sequence to iterate over.
+
+    """
+    def __init__(self, sequence):
+        self.sequence = sequence
+        self._offset = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._offset == len(self.sequence):
+            raise StopIteration()
+        result = self.sequence[self._offset]
+        self._offset += 1
+        return result

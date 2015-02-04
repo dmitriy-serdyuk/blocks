@@ -6,8 +6,6 @@ import six
 import theano
 from six import add_metaclass
 
-from blocks.utils import update_instance
-
 
 @add_metaclass(ABCMeta)
 class NdarrayInitialization(object):
@@ -18,17 +16,16 @@ class NdarrayInitialization(object):
 
         Parameters
         ----------
-        rng : object
-            A `numpy.random.RandomState`.
+        rng : :class:`numpy.random.RandomState`
         shape : tuple
             A shape tuple for the requested parameter array shape.
 
         Returns
         -------
-        ndarray
+        output : :class:`~numpy.ndarray`
             An ndarray with values drawn from the distribution specified by
             this object, of shape `shape`, with dtype
-            `theano.config.floatX`.
+            :attr:`config.floatX`.
 
         """
 
@@ -40,8 +37,7 @@ class NdarrayInitialization(object):
         var : object
             A Theano shared variable whose value will be set with values
             drawn from this :class:`NdarrayInitialization` instance.
-        rng : object
-            A `numpy.random.RandomState`.
+        rng : :class:`numpy.random.RandomState`
         shape : tuple
             A shape tuple for the requested parameter array shape.
 
@@ -54,13 +50,12 @@ class NdarrayInitialization(object):
 class Constant(NdarrayInitialization):
     """Initialize parameters to a constant.
 
-    The constant may be a scalar or an
-    array_like of any shape that is broadcastable with the requested
-    parameter arrays.
+    The constant may be a scalar or a :class:`~numpy.ndarray` of any shape
+    that is broadcastable with the requested parameter arrays.
 
     Parameters
     ----------
-    constant : array_like
+    constant : :class:`~numpy.ndarray`
         The initialization value to use. Must be a scalar or an ndarray (or
         compatible object, such as a nested list) that has a shape that is
         broadcastable with any shape requested by `initialize`.
@@ -80,13 +75,18 @@ class IsotropicGaussian(NdarrayInitialization):
 
     Parameters
     ----------
-    mean : float, optional
-        The mean of the Gaussian distribution. Defaults to 0
     std : float, optional
         The standard deviation of the Gaussian distribution. Defaults to 1.
+    mean : float, optional
+        The mean of the Gaussian distribution. Defaults to 0
+
+    Notes
+    -----
+    Be careful: the standard deviation goes first and the mean goes
+    second!
 
     """
-    def __init__(self, mean=0, std=1):
+    def __init__(self, std=1, mean=0):
         self._mean = mean
         self._std = std
 
@@ -183,17 +183,22 @@ class Sparse(NdarrayInitialization):
 
     """
     def __init__(self, num_init, weights_init, sparse_init=None):
+        self.num_init = num_init
+        self.weights_init = weights_init
+
         if sparse_init is None:
             sparse_init = Constant(0.)
-        update_instance(self, locals())
+        self.sparse_init = sparse_init
 
     def generate(self, rng, shape):
         weights = self.sparse_init.generate(rng, shape)
         if isinstance(self.num_init, six.integer_types):
-            assert self.num_init > 0
+            if not self.num_init > 0:
+                raise ValueError
             num_init = self.num_init
         else:
-            assert 1 >= self.num_init > 0
+            if not 1 >= self.num_init > 0:
+                raise ValueError
             num_init = int(self.num_init * shape[1])
         values = self.weights_init.generate(rng, (shape[0], num_init))
         for i in range(shape[0]):

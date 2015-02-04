@@ -6,8 +6,8 @@ are lazy-only, i.e. can not be initialized with a single constructor call.
 """
 import copy
 
-from blocks.bricks import lazy, application, MLP, Identity, Initializable
-from blocks.utils import update_instance
+from blocks.bricks import MLP, Identity, Initializable
+from blocks.bricks.base import lazy, application
 
 
 class Parallel(Initializable):
@@ -23,25 +23,29 @@ class Parallel(Initializable):
     output_dims : dict
         Dictonary of output dimensions, keys are channel names, values are
         dimensions.
-    prototype : :class:`Brick`
+    prototype : :class:`.Brick`
         A transformation prototype. A copy will be created for every
         channel.  If ``None``, a linear transformation is used.
 
     Notes
     -----
-    See :class:`Initializable` for initialization parameters.
+    See :class:`.Initializable` for initialization parameters.
 
     """
     @lazy
     def __init__(self, channel_names, input_dims, output_dims,
                  prototype=None, **kwargs):
         super(Parallel, self).__init__(**kwargs)
-        update_instance(self, locals())
+        self.channel_names = channel_names
+        self.input_dims = input_dims
+        self.output_dims = output_dims
 
-        if not self.prototype:
-            self.prototype = MLP([Identity()], use_bias=False)
+        if not prototype:
+            prototype = MLP([Identity()], use_bias=False)
+        self.prototype = prototype
+
         self.transforms = []
-        for name in self.channel_names:
+        for name in channel_names:
             self.transforms.append(copy.deepcopy(self.prototype))
             self.transforms[-1].name = "transform_{}".format(name)
         self.children = self.transforms
@@ -73,7 +77,7 @@ class Fork(Parallel):
     ----------
     fork_names : list of str
         Names of the channels to fork.
-    prototype : instance of :class:`Brick`
+    prototype : instance of :class:`.Brick`
         A prototype for the input-to-fork transformations. A copy will be
         created for every output channel.
 
@@ -81,8 +85,8 @@ class Fork(Parallel):
     ----------
     input_dim : int
         The input dimension. Required for allocation.
-    output_dims : dict of (output_name, int) pairs
-        The dimesions of the outputs. Required for allocation.
+    fork_dims : dict of (output_name, int) pairs
+        The dimensions of the forks. Required for allocation.
 
     Notes
     -----
@@ -98,7 +102,7 @@ class Fork(Parallel):
         self.output_dims = self.fork_dims
         super(Fork, self)._push_allocation_config()
 
-    @application(inputs='input_')
+    @application(inputs=['input_'])
     def apply(self, input_):
         return super(Fork, self).apply(**{name: input_
                                           for name in self.fork_names})
@@ -158,7 +162,8 @@ class Mixer(Parallel):
     @application
     def apply(self, **kwargs):
         new = kwargs.pop(self.new_name)
-        assert set(kwargs.keys()) == set(self.old_names)
+        if not set(kwargs.keys()) == set(self.old_names):
+            raise ValueError
         result = super(Mixer, self).apply(
             return_list=True, **{name: new for name in self.old_names})
         for i, name in enumerate(self.old_names):

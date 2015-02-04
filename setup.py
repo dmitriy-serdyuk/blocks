@@ -2,7 +2,7 @@ from codecs import open
 from os import path
 from setuptools import find_packages, setup
 
-import blocks
+import blocks.version
 
 here = path.abspath(path.dirname(__file__))
 
@@ -13,7 +13,7 @@ with open(path.join(here, 'README.rst'), encoding='utf-8') as f:
 
 setup(
     name='blocks',
-    version=blocks.__version__,
+    version=blocks.version.__version__,
     description='A Theano framework for building and training neural networks',
     long_description=long_description,
     url='https://github.com/bartvm/blocks',
@@ -32,9 +32,13 @@ setup(
         'Programming Language :: Python :: 3.4',
     ],
     keywords='theano machine learning neural networks deep learning',
-    packages=find_packages(exclude=['docs', 'tests']),
-    install_requires=['dill', 'numpy', 'theano', 'six'],
+    packages=find_packages(exclude=['examples', 'docs', 'tests']),
+    scripts=['bin/blocks-continue', 'bin/blocks-dump'],
+    install_requires=['dill', 'numpy', 'theano', 'six', 'pyyaml'],
     extras_require={
         'test': ['nose', 'nose2'],
+        'plot': ['bokeh'],
+        'docs': ['sphinx', 'sphinxcontrib-napoleon', 'sphinx-rtd-theme']
     },
+    zip_safe=False
 )

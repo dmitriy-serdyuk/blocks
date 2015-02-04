@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 import copy
 import inspect
+import warnings
 from collections import OrderedDict
+from functools import wraps
 
 import theano
-from theano import tensor
+from theano import tensor, Variable
 
-from blocks.bricks import (Application, application, application_wrapper,
-                           Brick, Initializable, Identity, Sigmoid, lazy)
+from blocks.bricks import Initializable, Identity, Sigmoid
+from blocks.bricks.base import Application, application, Brick, lazy
 from blocks.initialization import NdarrayInitialization
-from blocks.utils import pack, shared_floatx_zeros, update_instance
+from blocks.utils import (pack, shared_floatx_zeros, dict_union,
+                          is_shared_variable)
 
 
 class BaseRecurrent(Brick):
@@ -66,11 +69,13 @@ def recurrent(*args, **kwargs):
         Names of the outputs.
 
     """
-    def recurrent_wrapper(application, application_method):
-        arg_spec = inspect.getargspec(application_method)
+    def recurrent_wrapper(application_function):
+        arg_spec = inspect.getargspec(application_function)
         arg_names = arg_spec.args[1:]
 
-        def recurrent_apply(brick, *args, **kwargs):
+        @wraps(application_function)
+        def recurrent_apply(brick, application, application_call,
+                            *args, **kwargs):
             """Iterates a transition function.
 
             Parameters
@@ -86,7 +91,7 @@ def recurrent(*args, **kwargs):
 
             .. todo::
 
-                * Handle `updates` returned by the `theano.scan`
+                * Handle `updates` returned by the :func:`theano.scan`
                     routine.
                 * ``kwargs`` has a random order; check if this is a
                     problem.
@@ -100,11 +105,9 @@ def recurrent(*args, **kwargs):
             # Push everything to kwargs
             for arg, arg_name in zip(args, arg_names):
                 kwargs[arg_name] = arg
-            # Separate kwargs that aren't sequence, context or state variables
+            # Separate sequences, states and contexts
             scan_arguments = (application.sequences + application.states +
                               application.contexts)
-            rest_kwargs = {key: value for key, value in kwargs.items()
-                           if key not in scan_arguments}
 
             # Check what is given and what is not
             def only_given(arg_names):
@@ -126,6 +129,18 @@ def recurrent(*args, **kwargs):
                 # TODO Raise error if n_steps and batch_size not found?
                 n_steps = kwargs.pop('n_steps')
                 batch_size = kwargs.pop('batch_size')
+
+            # Handle the rest kwargs
+            rest_kwargs = {key: value for key, value in kwargs.items()
+                           if key not in scan_arguments}
+            for value in rest_kwargs.values():
+                if (isinstance(value, Variable) and not
+                        is_shared_variable(value)):
+                    warnings.warn(
+                        'Your function uses a non-shared variable other than'
+                        ' those given by scan explicitly. That can'
+                        ' significantly slow down `tensor.grad` call.'
+                        ' Did you forget to declare it in `contexts`?')
 
             # Ensure that all initial states are available.
             for state_name in application.states:
@@ -155,7 +170,7 @@ def recurrent(*args, **kwargs):
 
             # Apply methods
             if not iterate:
-                return application_method(brick, **kwargs)
+                return application_function(brick, **kwargs)
 
             def scan_function(*args):
                 args = list(args)
@@ -163,7 +178,7 @@ def recurrent(*args, **kwargs):
                              list(contexts_given))
                 kwargs = dict(zip(arg_names, args))
                 kwargs.update(rest_kwargs)
-                return application_method(brick, **kwargs)
+                return application_function(brick, **kwargs)
             outputs_info = (list(states_given.values())
                             + [None] * (len(application.outputs) -
                                         len(application.states)))
@@ -181,7 +196,8 @@ def recurrent(*args, **kwargs):
                                       tensor.subtensor.Subtensor)
                     result[i] = result[i].owner.inputs[0]
             if updates:
-                list(updates.values())[0].owner.tag.updates = updates
+                application_call.updates = dict_union(application_call.updates,
+                                                      updates)
             return result
 
         return recurrent_apply
@@ -189,25 +205,17 @@ def recurrent(*args, **kwargs):
     # Decorator can be used with or without arguments
     assert (args and not kwargs) or (not args and kwargs)
     if args:
-        application_method, = args
-        application = application_wrapper()(application_method)
-        return application.wrap(recurrent_wrapper)
+        application_function, = args
+        return application(recurrent_wrapper(application_function))
     else:
-        def wrapper(application_method):
-            application = application_wrapper(**kwargs)(application_method)
-            return application.wrap(recurrent_wrapper)
-        return wrapper
+        def wrap_application(application_function):
+            return application(**kwargs)(
+                recurrent_wrapper(application_function))
+        return wrap_application
 
 
 class Recurrent(BaseRecurrent, Initializable):
     """Simple recurrent layer with optional activation.
-
-    Parameters
-    ----------
-    dim : int
-        The dimension of the hidden state
-    activation : Brick
-        The brick to apply as activation.
 
     .. todo::
 
@@ -219,9 +227,16 @@ class Recurrent(BaseRecurrent, Initializable):
        * Carrying over hidden state between batches
        * Return k last hidden states
 
+    Parameters
+    ----------
+    dim : int
+        The dimension of the hidden state
+    activation : :class:`.Brick`
+        The brick to apply as activation.
+
     Notes
     -----
-    See :class:`Initializable` for initialization parameters.
+    See :class:`.Initializable` for initialization parameters.
 
     """
     @lazy
@@ -229,7 +244,9 @@ class Recurrent(BaseRecurrent, Initializable):
         super(Recurrent, self).__init__(**kwargs)
         if activation is None:
             activation = Identity()
-        update_instance(self, locals())
+        self.dim = dim
+        self.activation = activation
+
         self.children = [activation]
 
     @property
@@ -256,11 +273,11 @@ class Recurrent(BaseRecurrent, Initializable):
 
         Parameters
         ----------
-        input_ : Theano variable
+        input_ : :class:`~tensor.TensorVariable`
             The 2 dimensional input, in the shape (batch, features).
-        state : Theano variable
+        state : :class:`~tensor.TensorVariable`
             The 2 dimensional state, in the shape (batch, features).
-        mask : Theano variable
+        mask : :class:`~tensor.TensorVariable`
             A 1D binary array in the shape (batch,) which is 1 if
             there is data available, 0 if not. Assumed to be 1-s
             only if not given.
@@ -287,17 +304,17 @@ class GatedRecurrent(BaseRecurrent, Initializable):
     u"""Gated recurrent neural network.
 
     Gated recurrent neural network (GRNN) as introduced in [CvMG14]_. Every
-    unit of a GRNN is equiped with update and reset gates that facilitate
+    unit of a GRNN is equipped with update and reset gates that facilitate
     better gradient propagation.
 
     Parameters
     ----------
-    activation : Brick or None
-        The brick to apply as activation. If `None` an `Identity` brick is
-        used.
-    gated_activation : Brick or None
-        The brick to apply as activation for gates. If `None` a `Sigmoid`
-        brick is used.
+    activation : :class:`.Brick` or None
+        The brick to apply as activation. If ``None`` an
+        :class:`.bricks.Identity` brick is used.
+    gated_activation : :class:`.Brick` or None
+        The brick to apply as activation for gates. If ``None`` a
+        :class:`.Sigmoid` brick is used.
     dim : int
         The dimension of the hidden state.
     use_upgate_gate : bool
@@ -307,7 +324,7 @@ class GatedRecurrent(BaseRecurrent, Initializable):
 
     Notes
     -----
-    See :class:`Initializable` for initialization parameters.
+    See :class:`.Initializable` for initialization parameters.
 
     .. [CvMG14] Kyunghyun Cho, Bart van Merriënboer, Çağlar Gülçehre,
         Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua
@@ -319,13 +336,17 @@ class GatedRecurrent(BaseRecurrent, Initializable):
     def __init__(self, activation, gate_activation, dim,
                  use_update_gate=True, use_reset_gate=True, **kwargs):
         super(GatedRecurrent, self).__init__(**kwargs)
+        self.dim = dim
+        self.use_update_gate = use_update_gate
+        self.use_reset_gate = use_reset_gate
 
         if not activation:
             activation = Identity()
         if not gate_activation:
             gate_activation = Sigmoid()
+        self.activation = activation
+        self.gate_activation = gate_activation
 
-        update_instance(self, locals())
         self.children = [activation, gate_activation]
 
     @property
@@ -343,8 +364,7 @@ class GatedRecurrent(BaseRecurrent, Initializable):
     def get_dim(self, name):
         if name == 'mask':
             return 0
-        if name in (GatedRecurrent.apply.sequences
-                    + GatedRecurrent.apply.states):
+        if name in (self.apply.sequences + self.apply.states):
             return self.dim
         return super(GatedRecurrent, self).get_dim(name)
 
@@ -371,27 +391,27 @@ class GatedRecurrent(BaseRecurrent, Initializable):
 
         Parameters
         ----------
-        states : Theano variable
+        states : :class:`~tensor.TensorVariable`
             The 2 dimensional matrix of current states in the shape
             (batch_size, features). Required for `one_step` usage.
-        inputs : Theano matrix of floats
+        inputs : :class:`~tensor.TensorVariable`
             The 2 dimensional matrix of inputs in the shape (batch_size,
             features)
-        update_inputs : Theano variable
+        update_inputs : :class:`~tensor.TensorVariable`
             The 2 dimensional matrix of inputs to the update gates in the
             shape (batch_size, features). None when the update gates are
             not used.
-        reset_inputs : Theano variable
+        reset_inputs : :class:`~tensor.TensorVariable`
             The 2 dimensional matrix of inputs to the reset gates in the
             shape (batch_size, features). None when the reset gates are not
             used.
-        mask : Theano variable
+        mask : :class:`~tensor.TensorVariable`
             A 1D binary array in the shape (batch,) which is 1 if there is
             data available, 0 if not. Assumed to be 1-s only if not given.
 
         Returns
         -------
-        output : Theano variable
+        output : :class:`~tensor.TensorVariable`
             Next states of the network.
 
         """
@@ -447,7 +467,7 @@ class Bidirectional(Initializable):
 
     Notes
     -----
-    See :class:`Initializable` for initialization parameters.
+    See :class:`.Initializable` for initialization parameters.
 
     """
     has_bias = False
@@ -455,8 +475,9 @@ class Bidirectional(Initializable):
     @lazy
     def __init__(self, prototype, **kwargs):
         super(Bidirectional, self).__init__(**kwargs)
-        update_instance(self, locals())
-        self.children = [copy.deepcopy(prototype) for i in range(2)]
+        self.prototype = prototype
+
+        self.children = [copy.deepcopy(prototype) for _ in range(2)]
         self.children[0].name = 'forward'
         self.children[1].name = 'backward'
 
