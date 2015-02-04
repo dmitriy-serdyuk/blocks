@@ -1,11 +1,10 @@
 """Extensions for saving and loading the state of a training process."""
 import os.path
-import dill
 import logging
 
 from blocks.extensions import SimpleExtension, TrainingExtension
 from blocks.dump import MainLoopDumpManager
-from blocks.utils import reraise_as
+from blocks.utils import reraise_as, secure_dill_dump
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +25,12 @@ class SerializeMainLoop(SimpleExtension):
     ----------
     path : str
         The destination path for pickling.
+    save_separately : list of str, optional
+        The list of the main loop's attributes to be pickled separately
+        to their own files. The paths will be formed by adding
+        the attribute name preceded by an underscore before the
+        `path` extension. The whole main loop will still be pickled
+        as usual.
 
     Notes
     -----
@@ -41,20 +46,28 @@ class SerializeMainLoop(SimpleExtension):
 
 
     """
-    def __init__(self, path, **kwargs):
+    def __init__(self, path, save_separately=None, **kwargs):
         kwargs.setdefault("after_training", True)
         super(SerializeMainLoop, self).__init__(**kwargs)
+
         self.path = path
+        self.save_separately = save_separately
+
+        if not self.save_separately:
+            self.save_separately = []
 
     def do(self, callback_name, *args):
         """Pickle the main loop object to the disk."""
         try:
             self.main_loop.log.current_row[SAVED_TO] = self.path
-            with open(self.path, "wb") as destination:
-                dill.dump(self.main_loop, destination,
-                          fmode=dill.CONTENTS_FMODE)
+            secure_dill_dump(self.main_loop, self.path)
+            for attribute in self.save_separately:
+                root, ext = os.path.splitext(self.path)
+                path = root + "_" + attribute + ext
+                secure_dill_dump(getattr(self.main_loop, attribute), path)
         except:
             self.main_loop.log.current_row[SAVED_TO] = None
+            raise
 
 
 class LoadFromDump(TrainingExtension):
@@ -118,3 +131,4 @@ class Dump(SimpleExtension):
             self.manager.dump(self.main_loop)
         except:
             self.main_loop.log.current_row[SAVED_TO] = None
+            raise

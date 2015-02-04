@@ -1,6 +1,7 @@
 """The event-based main loop of Blocks."""
 import signal
 import logging
+import traceback
 
 from blocks.log import TrainingLog
 from blocks.utils import unpack
@@ -65,6 +66,15 @@ class MainLoop(object):
         self.status._epoch_started = False
 
     @property
+    def iteration_state(self):
+        """Quick access to the (data stream, epoch iterator) pair."""
+        return (self.data_stream, self.epoch_iterator)
+
+    @iteration_state.setter
+    def iteration_state(self, value):
+        (self.data_stream, self.epoch_iterator) = value
+
+    @property
     def status(self):
         """A shortcut for `self.log.status`."""
         return self.log.status
@@ -96,6 +106,12 @@ class MainLoop(object):
                 pass
         except TrainingFinish:
             self.log.current_row.training_finished = True
+        except Exception as e:
+            logger.error(traceback.format_exc(e))
+            logger.info(
+                "An error occurred during the training.\n"
+                "Attempting to run extensions before exiting...")
+            # TODO: change the serialization destination here
         finally:
             self._run_extensions('after_training')
             signal.signal(signal.SIGINT, self.original_handler)

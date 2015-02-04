@@ -86,28 +86,37 @@ class ComputationGraph(object):
         """Collect variables, updates and auxiliary variables."""
         updates = OrderedDict()
 
-        # Sort apply nodes topologically, get variables and remove duplicates
-        inputs = graph.inputs(self.outputs)
-        sorted_apply_nodes = graph.io_toposort(inputs, self.outputs)
+        shared_outputs = [o for o in self.outputs if is_shared_variable(o)]
+        usual_outputs = [o for o in self.outputs if not is_shared_variable(o)]
+        variables = shared_outputs
 
-        seen = set()
-        main_vars = [var for var in list(chain(
-            *[apply_node.inputs for apply_node in sorted_apply_nodes]))
-            if not (var in seen or seen.add(var))] + self.outputs
+        if usual_outputs:
+            # Sort apply nodes topologically, get variables and remove
+            # duplicates
+            inputs = graph.inputs(self.outputs)
+            sorted_apply_nodes = graph.io_toposort(inputs, usual_outputs)
 
-        # While preserving order add auxiliary variables, and collect updates
-        seen = set()
-        seen_avs = set(main_vars)  # Intermediate variables could be auxiliary
-        variables = []
-        for var in main_vars:
-            variables.append(var)
-            for annotation in getattr(var.tag, 'annotations', []):
-                if annotation not in seen:
-                    seen.add(annotation)
-                    new_avs = [av for av in annotation.auxiliary_variables
-                               if not (av in seen_avs or seen_avs.add(av))]
-                    variables.extend(new_avs)
-                    updates = dict_union(updates, annotation.updates)
+            seen = set()
+            main_vars = [var for var in list(chain(
+                *[apply_node.inputs for apply_node in sorted_apply_nodes]))
+                if not (var in seen or seen.add(var))] + self.outputs
+
+            # While preserving order add auxiliary variables, and collect
+            # updates
+            seen = set()
+            # Intermediate variables could be auxiliary
+            seen_avs = set(main_vars)
+            variables = []
+            for var in main_vars:
+                variables.append(var)
+                for annotation in getattr(var.tag, 'annotations', []):
+                    if annotation not in seen:
+                        seen.add(annotation)
+                        new_avs = [
+                            av for av in annotation.auxiliary_variables
+                            if not (av in seen_avs or seen_avs.add(av))]
+                        variables.extend(new_avs)
+                        updates = dict_union(updates, annotation.updates)
 
         self.variables = variables
         self.updates = updates
@@ -235,7 +244,7 @@ class Annotation(object):
         self.auxiliary_variables = []
         self.updates = OrderedDict()
 
-    def add_auxiliary_variable(self, expression, roles=None, name=None):
+    def add_auxiliary_variable(self, variable, roles=None, name=None):
         """Attach an auxiliary variable to the graph.
 
         Auxiliary variables are Theano variables that are not part of a
@@ -244,15 +253,15 @@ class Annotation(object):
 
         Parameters
         ----------
-        expression : :class:`~tensor.TensorVariable`
-            The expression of the variable you want to add.
+        variable : :class:`~tensor.TensorVariable`
+            The variable you want to add.
         roles : list of :class:`.VariableRole` instances, optional
             The roles of this variable. The :const:`.AUXILIARY`
             role will automatically be added. Other options are
             :const:`.COST`, :const:`.WEIGHTS`, etc.
         name : str, optional
-            The name of the expression; overrides the name of the variable
-            if it already has one.
+            Name to give to the variable. If the variable already has a
+            name it will be overwritten.
 
         Examples
         --------
@@ -283,15 +292,15 @@ class Annotation(object):
         {mean_x}
 
         """
-        add_annotation(expression, self)
+        add_annotation(variable, self)
         if name is not None:
-            expression.name = name
-            expression.tag.name = name
-        add_role(expression, AUXILIARY)
+            variable.name = name
+            variable.tag.name = name
+        add_role(variable, AUXILIARY)
         if roles is not None:
             for role in roles:
-                add_role(expression, role)
-        self.auxiliary_variables.append(expression)
+                add_role(variable, role)
+        self.auxiliary_variables.append(variable)
 
 
 def apply_noise(graph, variables, level, seed=None):
