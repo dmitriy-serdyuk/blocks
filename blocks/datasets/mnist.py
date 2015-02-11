@@ -6,13 +6,13 @@ import numpy
 import theano
 
 from blocks import config
-from blocks.datasets import InMemoryDataset, lazy_properties
+from blocks.datasets import InMemoryDataset
 from blocks.datasets.schemes import SequentialScheme
 MNIST_IMAGE_MAGIC = 2051
 MNIST_LABEL_MAGIC = 2049
 
 
-@lazy_properties('features', 'targets')
+@InMemoryDataset.lazy_properties('features', 'targets')
 class MNIST(InMemoryDataset):
     u"""The MNIST dataset of handwritten digits.
 
@@ -30,13 +30,6 @@ class MNIST(InMemoryDataset):
        Right now this dataset always returns flattened images. In order to
        support e.g. convolutions and visualization, it needs to support the
        original 28 x 28 image format.
-
-    .. todo::
-
-       The data path is hardcoded right now. A similar approach to Pylearn2
-       should be adopted, where the data path can be configured in one way
-       or the other, so that it can seamlessly load datasets from one
-       directory (e.g. /data/lisa/data).
 
     Parameters
     ----------

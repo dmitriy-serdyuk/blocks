@@ -156,11 +156,11 @@ class MainLoopDumpManager(object):
 
     @property
     def path_to_parameters(self):
-        return "{}/{}".format(self.folder, "params.npz")
+        return os.path.join(self.folder, 'params.npz')
 
     @property
     def path_to_iteration_state(self):
-        return "{}/{}".format(self.folder, "iteration_state.pkl")
+        return os.path.join(self.folder, 'iterations_state.pkl')
 
     @property
     def path_to_log(self):
@@ -169,16 +169,15 @@ class MainLoopDumpManager(object):
         # then pickled file. Or alternatively, log will be dump as pure
         # text file of (time, key, value) triples. Currenly log is just
         # pickled though.
-        return "{}/{}".format(self.folder, "log")
+        return os.path.join(self.folder, 'log')
 
     def dump_parameters(self, main_loop):
         save_parameter_values(extract_parameter_values(main_loop.model),
                               self.path_to_parameters)
 
     def dump_iteration_state(self, main_loop):
-        iteration_state = (main_loop.data_stream, main_loop.epoch_iterator)
         with open(self.path_to_iteration_state, "wb") as destination:
-            dill.dump(iteration_state, destination)
+            dill.dump(main_loop.iteration_state, destination)
 
     def dump_log(self, main_loop):
         with open(self.path_to_log, "wb") as destination:
@@ -216,8 +215,7 @@ class MainLoopDumpManager(object):
 
     def load_to(self, main_loop):
         """Loads the dump from the root folder into the main loop."""
-        parameters, (data_stream, epoch_iterator), log = self.load()
+        parameters, iteration_state, log = self.load()
         inject_parameter_values(main_loop.model, parameters)
-        main_loop.data_stream = data_stream
-        main_loop.epoch_iterator = epoch_iterator
+        main_loop.iteration_state = iteration_state
         main_loop.log = log

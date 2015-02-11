@@ -10,7 +10,7 @@ from theano import tensor
 
 from blocks.graph import ComputationGraph
 from blocks.utils import named_copy, shared_floatx
-from blocks.theano_expressions import L2_norm
+from blocks.theano_expressions import l2_norm
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,14 @@ class DifferentiableCostMinimizer(TrainingAlgorithm):
         self.updates.extend(updates)
 
 
+variable_mismatch_error = """
+
+Blocks tried to match the sources ({sources}) of the training dataset to \
+the names of the Theano variables ({variables}), but failed to do so. \
+If you want to train on a subset of the sources that your dataset provides, \
+pass the `sources` keyword argument to its constructor. """
+
+
 class GradientDescent(DifferentiableCostMinimizer):
     """A base class for all gradient descent algorithms.
 
@@ -179,26 +187,31 @@ class GradientDescent(DifferentiableCostMinimizer):
             logger.info("The cost gradient computation graph is built")
         self.step_rule = step_rule if step_rule else SteepestDescent()
 
-        self.total_gradient_norm = named_copy(L2_norm(self.gradients.values()),
+        self.total_gradient_norm = named_copy(l2_norm(self.gradients.values()),
                                               "total_gradient_norm")
+        self.steps, self.step_rule_updates = (
+            self.step_rule.compute_steps(self.gradients))
+        self.total_step_norm = named_copy(l2_norm(self.steps.values()),
+                                          "total_step_norm")
 
     def initialize(self):
         logger.info("Initializing the training algorithm")
         all_updates = self.updates
-        steps = self.step_rule.compute_steps(self.gradients)
         # Note: the gradients are computed in the same order in which
         # the parameters were given. Keep it like that to ensure
         # reproducibility.
         for param in self.params:
-            all_updates.append((param, param + steps[param]))
+            all_updates.append((param, param + self.steps[param]))
+        all_updates += self.step_rule_updates
         self._function = theano.function(self.inputs, [], updates=all_updates)
         logger.info("The training algorithm is initialized")
 
     def process_batch(self, batch):
         if not set(batch.keys()) == set([v.name for v in self.inputs]):
-            raise ValueError("The names of the input variables of your"
-                             " computation graph must correspond to the"
-                             " data sources.")
+            raise ValueError("mismatch of variable names and data sources" +
+                             variable_mismatch_error.format(
+                                sources=batch.keys(),
+                                variables=[v.name for v in self.inputs]))
         ordered_batch = [batch[v.name] for v in self.inputs]
         self._function(*ordered_batch)
 
@@ -221,7 +234,10 @@ class StepRule(object):
 
         Returns
         -------
-            A Theano expression for the descent step.
+        step : :class:`~theano.Variable`
+            Theano variable for the step to take.
+        updates : list
+            A list of tuples representing updates to be performed.
 
         """
         raise NotImplementedError
@@ -234,31 +250,29 @@ class StepRule(object):
 
         Parameters
         ----------
-        gradients : :class:`~OrderedDict` of
-                    (:class:`~tensor.TensorSharedVariable`
-                    :class:`~tensor.TensorVariable`) pairs
-            A dictionary. The keys are the optimized parameters, the values
-            are the expressions for the gradients of the cost with respect
-            to the parameters.
+        gradients : OrderedDict
+            An :class:`~OrderedDict` of
+            (:class:`~tensor.TensorSharedVariable`
+            :class:`~tensor.TensorVariable`) pairs. The keys are the
+            parameters being trained, the values are the expressions for
+            the gradients of the cost with respect to the parameters.
 
         Returns
         -------
-        An ordered dictionary of the same form as `gradient`, with the
-        proposed steps as values.
+        steps : OrderedDict
+            A dictionary of the proposed steps in the same form as
+            `gradients`.
+        updates : list
+            A list of tuples representing updates to be performed.
 
         """
-        return OrderedDict((param, self.compute_step(param, gradients[param]))
-                           for param in gradients)
-
-    def additional_updates(self):
-        """Return updates to be done in addition to parameter modification.
-
-        Returns
-        -------
-        updates : :class:`~tensor.TensorSharedVariable` updates
-
-        """
-        return []
+        parameter_wise = [self.compute_step(param, gradients[param])
+                          for param in gradients]
+        (steps, updates) = zip(*parameter_wise)
+        steps = OrderedDict((param, step) for param, step
+                            in zip(gradients.keys(), steps))
+        updates = list(itertools.chain(*updates))
+        return steps, updates
 
 
 class SteepestDescent(StepRule):
@@ -280,7 +294,74 @@ class SteepestDescent(StepRule):
         self.learning_rate = shared_floatx(learning_rate)
 
     def compute_step(self, param, gradient):
-        return -self.learning_rate * gradient
+        return -self.learning_rate * gradient, []
+
+
+class Momentum(StepRule):
+    """Accumulates the step with exponential discount.
+
+    Parameters
+    ----------
+    momentum : float, optional
+        The momentum coefficient.
+
+    """
+    def __init__(self, momentum=0.):
+        self.momentum = shared_floatx(momentum)
+
+    def compute_step(self, param, gradient):
+        velocity = shared_floatx(param.get_value() * 0.)
+        step = self.momentum * velocity + gradient
+        updates = [(velocity, step)]
+        return step, updates
+
+
+class AdaDelta(StepRule):
+    """Adapts the step size over time using only first order information.
+
+    Parameters
+    ----------
+    decay_rate : float, optional
+        Decay rate in [0, 1]. Defaults to 0.
+    epsilon : float, optional
+        Stabilizing constant for RMS. Defaults to 1e-7.
+
+    Notes
+    -----
+    For more information, see [ADADELTA]_.
+
+    .. [ADADELTA] Matthew D. Zeiler, *ADADELTA: An Adaptive Learning
+       Rate Method*, arXiv:1212.5701.
+
+    """
+    def __init__(self, decay_rate=0., epsilon=1e-7):
+        if not 0.0 <= decay_rate <= 1.0:
+            raise ValueError("decay rate needs to be in [0, 1]")
+        self.decay_rate = shared_floatx(decay_rate)
+        self.epsilon = shared_floatx(epsilon)
+
+    def compute_step(self, param, gradient):
+        mean_square_grad_tm1 = shared_floatx(param.get_value() * 0.)
+        mean_square_delta_x_tm1 = shared_floatx(param.get_value() * 0.)
+
+        mean_square_grad_t = (
+            self.decay_rate * mean_square_grad_tm1 +
+            (1 - self.decay_rate) * tensor.sqr(gradient)
+        )
+
+        rms_delta_x_tm1 = tensor.sqrt(mean_square_delta_x_tm1 + self.epsilon)
+        rms_grad_t = tensor.sqrt(mean_square_grad_t + self.epsilon)
+        delta_x_t = - rms_delta_x_tm1 / rms_grad_t * gradient
+
+        mean_square_delta_x_t = (
+            self.decay_rate * mean_square_delta_x_tm1 +
+            (1 - self.decay_rate) * tensor.sqr(delta_x_t)
+        )
+
+        step = delta_x_t
+        updates = [(mean_square_grad_tm1, mean_square_grad_t),
+                   (mean_square_delta_x_tm1, mean_square_delta_x_t)]
+        return step, updates
 
 
 class GradientClipping(StepRule):
@@ -306,12 +387,13 @@ class GradientClipping(StepRule):
     def compute_steps(self, gradients):
         if not hasattr(self, 'threshold'):
             return gradients
-        norm = L2_norm(gradients.values())
+        norm = l2_norm(gradients.values())
         multiplier = tensor.switch(norm < self.threshold,
                                    1, self.threshold / norm)
-        return OrderedDict(
+        steps = OrderedDict(
             (param, gradient * multiplier)
             for param, gradient in gradients.items())
+        return steps, []
 
 
 class CompositeRule(StepRule):
@@ -329,10 +411,8 @@ class CompositeRule(StepRule):
 
     def compute_steps(self, gradients):
         result = gradients
+        updates = []
         for rule in self.components:
-            result = rule.compute_steps(result)
-        return result
-
-    def additional_updates(self):
-        return list(itertools.chain(*(component.additional_updates()
-                                      for component in self.components)))
+            result, more_updates = rule.compute_steps(result)
+            updates += more_updates
+        return result, updates

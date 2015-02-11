@@ -1,9 +1,10 @@
 """The event-based main loop of Blocks."""
 import signal
 import logging
+import traceback
 
 from blocks.log import TrainingLog
-from blocks.utils import unpack
+from blocks.utils import reraise_as, unpack
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,15 @@ class MainLoop(object):
         self.status._epoch_started = False
 
     @property
+    def iteration_state(self):
+        """Quick access to the (data stream, epoch iterator) pair."""
+        return (self.data_stream, self.epoch_iterator)
+
+    @iteration_state.setter
+    def iteration_state(self, value):
+        (self.data_stream, self.epoch_iterator) = value
+
+    @property
     def status(self):
         """A shortcut for `self.log.status`."""
         return self.log.status
@@ -96,6 +106,12 @@ class MainLoop(object):
                 pass
         except TrainingFinish:
             self.log.current_row.training_finished = True
+        except Exception as e:
+            logger.error(traceback.format_exc(e))
+            logger.info(
+                "An error occurred during the training.\n"
+                "Attempting to run extensions before exiting...")
+            # TODO: change the serialization destination here
         finally:
             self._run_extensions('after_training')
             signal.signal(signal.SIGINT, self.original_handler)
@@ -119,6 +135,7 @@ class MainLoop(object):
     def _run_epoch(self):
         if not self.status._epoch_started:
             try:
+                self.log.status._received_first_batch = False
                 self.epoch_iterator = (self.data_stream.
                                        get_epoch_iterator(as_dict=True))
             except StopIteration:
@@ -139,7 +156,10 @@ class MainLoop(object):
         try:
             batch = next(self.epoch_iterator)
         except StopIteration:
+            if not self.log.status._received_first_batch:
+                reraise_as(ValueError("epoch iterator yielded zero batches"))
             return False
+        self.log.status._received_first_batch = True
         self._run_extensions('before_batch', batch)
         self.algorithm.process_batch(batch)
         self.status.iterations_done += 1

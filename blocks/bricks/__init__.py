@@ -1,11 +1,11 @@
 """The interface of bricks and some simple implementations."""
 import logging
-from itertools import chain
 
 import numpy
 from six import add_metaclass
 from theano import tensor
 from theano.sandbox.rng_mrg import MRG_RandomStreams
+from toolz import interleave
 
 from blocks import config
 from blocks.bricks.base import application, _Brick, Brick, lazy
@@ -247,6 +247,13 @@ class Linear(Initializable, Feedforward):
         if self.use_bias:
             output += b
         return output
+
+    def get_dim(self, name):
+        if name == 'input_':
+            return self.input_dim
+        if name == 'output':
+            return self.output_dim
+        super(Linear, self).get_dim(name)
 
 
 class Maxout(Brick):
@@ -497,8 +504,8 @@ class MLP(Sequence, Initializable, Feedforward):
         self.linear_transformations = [Linear(name='linear_{}'.format(i))
                                        for i in range(len(activations))]
         # Interleave the transformations and activations
-        application_methods = [brick.apply for brick in list(chain(*zip(
-            self.linear_transformations, activations))) if brick is not None]
+        application_methods = [brick.apply for brick in interleave(
+            [self.linear_transformations, activations]) if brick is not None]
         if not dims:
             dims = [None] * (len(activations) + 1)
         self.dims = dims
