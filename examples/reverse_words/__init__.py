@@ -19,7 +19,7 @@ from blocks.bricks.parallel import Fork
 from blocks.bricks.sequence_generators import (
     SequenceGenerator, LinearReadout, SoftmaxEmitter, LookupFeedback)
 from blocks.graph import ComputationGraph
-from blocks.datasets import (
+from blocks.datasets.streams import (
     DataStreamMapping, BatchDataStream, PaddingDataStream,
     DataStreamFilter)
 from blocks.datasets.text import OneBillionWord
@@ -126,7 +126,7 @@ def main(mode, save_path, num_batches, from_dump):
                     weights_init=IsotropicGaussian(0.1),
                     biases_init=Constant(0))
         fork.input_dim = dimension
-        fork.fork_dims = {name: dimension for name in fork.fork_names}
+        fork.output_dims = {name: dimension for name in fork.input_names}
         fork.initialize()
         lookup = LookupTable(readout_dimension, dimension,
                              weights_init=IsotropicGaussian(0.1))
@@ -187,7 +187,8 @@ def main(mode, save_path, num_batches, from_dump):
         (activations,) = VariableFilter(
             application=generator.transition.apply,
             name="states")(cg.variables)
-        mean_activation = named_copy(activations.mean(), "mean_activation")
+        mean_activation = named_copy(abs(activations).mean(),
+                                     "mean_activation")
 
         # Define the training algorithm.
         algorithm = GradientDescent(

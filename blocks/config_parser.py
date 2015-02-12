@@ -43,6 +43,14 @@ The following configurations are supported:
    :class:`~theano.sandbox.rng_mrg.MRG_RandomStreams` objects. Must be an
    integer. By default this is set to 1.
 
+.. option:: recursion_limit
+
+   The recursion max depth limit used in
+   :class:`~blocks.main_loop.MainLoop` as well as in other situations when
+   deep recursion is required. The most notable example of such a situation
+   is pickling or unpickling a complex structure with lots of objects, such
+   as a big Theano computation graph.
+
 .. _YAML: http://yaml.org/
 .. _environment variables:
    https://en.wikipedia.org/wiki/Environment_variable
@@ -83,19 +91,20 @@ class Configuration(object):
     def __getattr__(self, key):
         if key == 'config' or key not in self.config:
             raise AttributeError
-        config = self.config[key]
-        if 'value' in config:
-            value = config['value']
-        elif 'env_var' in config and config['env_var'] in os.environ:
-            value = os.environ[config['env_var']]
-        elif 'yaml' in config:
-            value = config['yaml']
-        elif 'default' in config:
-            value = config['default']
+        config_setting = self.config[key]
+        if 'value' in config_setting:
+            value = config_setting['value']
+        elif ('env_var' in config_setting and
+              config_setting['env_var'] in os.environ):
+            value = os.environ[config_setting['env_var']]
+        elif 'yaml' in config_setting:
+            value = config_setting['yaml']
+        elif 'default' in config_setting:
+            value = config_setting['default']
         else:
             raise ConfigurationError("Configuration not set and no default "
                                      "provided: {}.".format(key))
-        return config['type'](value)
+        return config_setting['type'](value)
 
     def __setattr__(self, key, value):
         if key != 'config' and key in self.config:
@@ -138,5 +147,6 @@ config = Configuration()
 # Define configuration options
 config.add_config('data_path', type_=str, env_var='BLOCKS_DATA_PATH')
 config.add_config('default_seed', type_=int, default=1)
+config.add_config('recursion_limit', type_=int, default=10000)
 
 config.load_yaml()
