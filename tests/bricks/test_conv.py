@@ -61,12 +61,9 @@ class ConvNN(Sequence, Initializable, Feedforward):
 
     """
     def __init__(self, conv_activations, input_dim, filter_sizes,
-                 feature_maps, pooling_sizes, conv_step=None, **kwargs):
-        if conv_step == None:
-            self.conv_step = (1, 1)
-        else:
-            self.conv_step = conv_step
+                 feature_maps, pooling_sizes, conv_step=(1, 1), **kwargs):
         self.input_dim = input_dim
+        self.conv_step = conv_step
 
         params = zip(conv_activations, filter_sizes, feature_maps,
                      pooling_sizes)
@@ -81,10 +78,7 @@ class ConvNN(Sequence, Initializable, Feedforward):
                                pooling_size)
                        in enumerate(params)]
 
-        application_methods = [brick.apply for brick in list(chain(*zip(
-            self.layers)))
-                               if brick is not None]
-        self.flattener = Flattener()
+        application_methods = [brick.apply for brick in self.layers]
         super(ConvNN, self).__init__(application_methods, **kwargs)
 
     def _push_allocation_config(self):
