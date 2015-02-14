@@ -7,8 +7,7 @@ from theano import tensor
 from theano import function
 
 from blocks.bricks import Sequence, Initializable, Feedforward, Rectifier
-from blocks.bricks.conv import (Convolutional, MaxPooling, ConvolutionalLayer,
-                                Flattener)
+from blocks.bricks.conv import Convolutional, MaxPooling, ConvolutionalLayer
 from blocks.initialization import Constant, IsotropicGaussian
 
 
