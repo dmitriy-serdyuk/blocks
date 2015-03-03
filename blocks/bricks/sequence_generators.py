@@ -11,7 +11,7 @@ from blocks.bricks.lookup import LookupTable
 from blocks.bricks.recurrent import recurrent
 from blocks.bricks.attention import (
     AbstractAttentionRecurrent, AttentionRecurrent)
-from blocks.utils import dict_union
+from blocks.utils import dict_union, dict_subset
 
 
 class BaseSequenceGenerator(Initializable):
@@ -107,13 +107,9 @@ class BaseSequenceGenerator(Initializable):
 
     def _push_allocation_config(self):
         # Configure readout
-        # TODO: optional states? contexts?
-        state_dims = {name: self.transition.get_dim(name)
-                      for name in self.state_names}
-        context_dims = {name: self.transition.get_dim(name)
-                        for name in self.context_names}
-        self.glimpse_dims = {name: self.transition.get_dim(name)
-                             for name in self.glimpse_names}
+        state_dims = self.transition.get_dims(self.state_names)
+        context_dims = self.transition.get_dims(self.context_names)
+        self.glimpse_dims = self.transition.get_dims(self.glimpse_names)
         self.readout.source_dims = dict_union(
             state_dims, context_dims, self.glimpse_dims,
             feedback=self.readout.get_dim('feedback'))
@@ -123,9 +119,8 @@ class BaseSequenceGenerator(Initializable):
         if not len(feedback_names) == 1:
             raise ValueError
         self.fork.input_dim = self.readout.get_dim(feedback_names[0])
-        self.fork.output_dims = {
-            name: self.transition.get_dim(name)
-            for name in self.fork.apply.outputs}
+        self.fork.output_dims = self.transition.get_dims(
+            self.fork.apply.outputs)
 
     @application
     def cost(self, application_call, outputs, mask=None, **kwargs):
@@ -148,9 +143,8 @@ class BaseSequenceGenerator(Initializable):
         batch_size = outputs.shape[-2]  # TODO Assumes only 1 features dim
 
         # Prepare input for the iterative part
-        states = {name: kwargs[name] for name in self.state_names
-                  if name in kwargs}
-        contexts = {name: kwargs[name] for name in self.context_names}
+        states = dict_subset(kwargs, self.state_names, must_have=False)
+        contexts = dict_subset(kwargs, self.context_names)
         feedback = self.readout.feedback(outputs)
         inputs = (self.fork.apply(feedback, as_dict=True)
                   if self.fork else {'feedback': feedback})
@@ -178,7 +172,6 @@ class BaseSequenceGenerator(Initializable):
             application_call.add_auxiliary_variable(
                 variable.copy(), name=name)
 
-        # In case the user needs some glimpses or states or smth else
         return costs
 
     @recurrent
@@ -196,9 +189,9 @@ class BaseSequenceGenerator(Initializable):
             as keyword arguments.
 
         """
-        states = {name: kwargs[name] for name in self.state_names}
-        contexts = {name: kwargs[name] for name in self.context_names}
-        glimpses = {name: kwargs[name] for name in self.glimpse_names}
+        states = dict_subset(kwargs, self.state_names)
+        contexts = dict_subset(kwargs, self.context_names)
+        glimpses = dict_subset(kwargs, self.glimpse_names)
 
         next_glimpses = self.transition.take_glimpses(
             as_dict=True, **dict_union(states, glimpses, contexts))
@@ -374,8 +367,8 @@ class LinearReadout(Readout, Initializable):
     def _push_allocation_config(self):
         super(LinearReadout, self)._push_allocation_config()
         for name, projector in zip(self.source_names, self.projectors):
-            projector.dims[0] = self.source_dims[name]
-            projector.dims[-1] = self.readout_dim
+            projector.input_dim = self.source_dims[name]
+            projector.output_dim = self.readout_dim
 
     @application
     def readout(self, **kwargs):
@@ -394,6 +387,10 @@ class TrivialEmitter(AbstractEmitter):
     readout_dim : int
         The dimension of the readout.
 
+    Notes
+    -----
+    By default :meth:`cost` always returns zero tensor.
+
     """
     @lazy
     def __init__(self, readout_dim, **kwargs):
@@ -403,6 +400,10 @@ class TrivialEmitter(AbstractEmitter):
     @application
     def emit(self, readouts):
         return readouts
+
+    @application
+    def cost(self, readouts, outputs):
+        return tensor.zeros_like(outputs)
 
     @application
     def initial_outputs(self, batch_size, *args, **kwargs):
@@ -420,19 +421,23 @@ class SoftmaxEmitter(AbstractEmitter, Initializable, Random):
     Interprets readout elements as energies corresponding to their indices.
 
     """
-    def _probs(self, readouts):
+    @application
+    def probs(self, readouts):
         shape = readouts.shape
         return tensor.nnet.softmax(readouts.reshape(
             (tensor.prod(shape[:-1]), shape[-1]))).reshape(shape)
 
     @application
     def emit(self, readouts):
-        probs = self._probs(readouts)
-        return self.theano_rng.multinomial(pvals=probs).argmax(axis=-1)
+        probs = self.probs(readouts)
+        batch_size = probs.shape[0]
+        pvals_flat = probs.reshape((batch_size, -1))
+        generated = self.theano_rng.multinomial(pvals=pvals_flat)
+        return generated.reshape(probs.shape).argmax(axis=-1)
 
     @application
     def cost(self, readouts, outputs):
-        probs = self._probs(readouts)
+        probs = self.probs(readouts)
         max_output = probs.shape[-1]
         flat_outputs = outputs.flatten()
         num_outputs = flat_outputs.shape[0]
