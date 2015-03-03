@@ -24,5 +24,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-batches", default=20000, type=int,
         help="Train on this many batches.")
+    parser.add_argument("--data-path", default=None)
     args = parser.parse_args()
     main(**vars(args))

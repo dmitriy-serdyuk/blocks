@@ -17,7 +17,8 @@ from blocks.bricks.recurrent import SimpleRecurrent, Bidirectional
 from blocks.bricks.attention import SequenceContentAttention
 from blocks.bricks.parallel import Fork
 from blocks.bricks.sequence_generators import (
-    SequenceGenerator, LinearReadout, SoftmaxEmitter, LookupFeedback)
+    SequenceGenerator, LinearReadout, SoftmaxEmitter, LookupFeedback,
+    TrivialEmitter, TrivialFeedback)
 from blocks.config_parser import config
 from blocks.graph import ComputationGraph
 from fuel.transformers import Mapping, Batch, Padding, Filter
@@ -108,37 +109,72 @@ class WordReverser(Initializable):
             sequence_dim=2 * dimension, match_dim=dimension, name="attention")
         readout = LinearReadout(
             readout_dim=alphabet_size, source_names=["states"],
-            emitter=SoftmaxEmitter(name="emitter"),
-            feedbacker=LookupFeedback(alphabet_size, dimension),
+            emitter=TrivialEmitter(name="emitter"),
+            feedbacker=TrivialFeedback(alphabet_size),
             name="readout")
         generator = SequenceGenerator(
             readout=readout, transition=transition, attention=attention,
             name="generator")
 
+        encoder2 = Bidirectional(
+            SimpleRecurrent(dim=dimension, activation=Tanh()))
+        fork2 = Fork([name for name in encoder2.prototype.apply.sequences
+                     if name != 'mask'])
+        fork2.input_dim = dimension
+        fork2.output_dims = {name: dimension for name in fork2.input_names}
+        transition2 = SimpleRecurrent(
+            activation=Tanh(),
+            dim=dimension, name="transition2")
+        attention2 = SequenceContentAttention(
+            state_names=transition2.apply.states,
+            sequence_dim=alphabet_size, match_dim=dimension, name="attention2")
+        readout2 = LinearReadout(
+            readout_dim=alphabet_size, source_names=["states"],
+            emitter=SoftmaxEmitter(name="emitter2"),
+            feedbacker=LookupFeedback(alphabet_size, dimension),
+            name="readout2")
+        generator2 = SequenceGenerator(
+            readout=readout2, transition=transition2, attention=attention2,
+            name="generator2")
+
         self.lookup = lookup
         self.fork = fork
         self.encoder = encoder
         self.generator = generator
-        self.children = [lookup, fork, encoder, generator]
+        self.fork2 = fork2
+        self.encoder2 = encoder2
+        self.generator2 = generator2
+        self.dimension = dimension
+        self.children = [lookup, fork, encoder, generator,
+                         fork2, encoder2, generator2]
 
     @application
     def cost(self, chars, chars_mask, targets, targets_mask):
-        return self.generator.cost(
+        attended = self.encoder.apply(
+            **dict_union(
+                self.fork.apply(self.lookup.lookup(chars), as_dict=True),
+                mask=chars_mask))
+        _, outputs, _, _, _ = self.generator.generate(
+            n_steps=3 * chars.shape[0], batch_size=chars.shape[1],
+            attended=attended, attended_mask=tensor.ones_like(chars))
+        return self.generator2.cost(
             targets, targets_mask,
-            attended=self.encoder.apply(
-                **dict_union(
-                    self.fork.apply(self.lookup.lookup(chars), as_dict=True),
-                    mask=chars_mask)),
-            attended_mask=chars_mask)
+            attended=outputs,
+            attended_mask=tensor.ones((3 * chars.shape[0], chars.shape[1])))
 
     @application
     def generate(self, chars):
-        return self.generator.generate(
+        attended = self.encoder.apply(
+            **dict_union(
+                self.fork.apply(self.lookup.lookup(chars), as_dict=True),
+                mask=tensor.ones_like(chars)))
+        _, outputs, _, _, _ = self.generator.generate(
             n_steps=3 * chars.shape[0], batch_size=chars.shape[1],
-            attended=self.encoder.apply(
-                **dict_union(self.fork.apply(self.lookup.lookup(chars),
-                             as_dict=True))),
-            attended_mask=tensor.ones(chars.shape))
+            attended=attended, attended_mask=tensor.ones_like(chars))
+        return self.generator2.generate(
+            n_steps=3 * chars.shape[0], batch_size=chars.shape[1],
+            attended=outputs,
+            attended_mask=tensor.ones((3 * chars.shape[0], chars.shape[1])))
 
 
 def main(mode, save_path, num_batches, data_path=None):
@@ -148,10 +184,7 @@ def main(mode, save_path, num_batches, data_path=None):
         # Data processing pipeline
         dataset_options = dict(dictionary=char2code, level="character",
                                preprocess=_lower)
-        if data_path:
-            dataset = TextFile(data_path, **dataset_options)
-        else:
-            dataset = OneBillionWord("training", [99], **dataset_options)
+        dataset = OneBillionWord("training", [99], **dataset_options)
         data_stream = Mapping(
             mapping=_transpose,
             data_stream=Padding(
@@ -204,16 +237,16 @@ def main(mode, save_path, num_batches, data_path=None):
             "character_log_likelihood")
         cg = ComputationGraph(cost)
         r = reverser
-        (energies,) = VariableFilter(
-            application=r.generator.readout.readout,
-            name="output")(cg.variables)
-        min_energy = named_copy(energies.min(), "min_energy")
-        max_energy = named_copy(energies.max(), "max_energy")
-        (activations,) = VariableFilter(
-            application=r.generator.transition.apply,
-            name="states")(cg.variables)
-        mean_activation = named_copy(abs(activations).mean(),
-                                     "mean_activation")
+        #(energies,) = VariableFilter(
+        #    application=r.generator2.readout.readout,
+        #    name="output")(cg.variables)
+        #min_energy = named_copy(energies.min(), "min_energy")
+        #max_energy = named_copy(energies.max(), "max_energy")
+        #(activations,) = VariableFilter(
+        #    application=r.generator2.transition.apply,
+        #    name="states")(cg.variables)
+        #mean_activation = named_copy(abs(activations).mean(),
+        #                             "mean_activation")
 
         # Define the training algorithm.
         algorithm = GradientDescent(
@@ -222,9 +255,10 @@ def main(mode, save_path, num_batches, data_path=None):
 
         # More variables for debugging
         observables = [
-            cost, min_energy, max_energy, mean_activation,
-            batch_size, max_length, cost_per_character,
-            algorithm.total_step_norm, algorithm.total_gradient_norm]
+            cost, #min_energy, max_energy, mean_activation,
+            #batch_size, max_length, cost_per_character,
+            #algorithm.total_step_norm, algorithm.total_gradient_norm
+        ]
         for name, param in params.items():
             observables.append(named_copy(
                 param.norm(2), name + "_norm"))
