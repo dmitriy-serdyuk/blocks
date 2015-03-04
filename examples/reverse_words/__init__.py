@@ -82,6 +82,7 @@ def _filter_long(data):
 
 
 def _is_nan(log):
+    print(log.current_row.total_gradient_norm)
     return math.isnan(log.current_row.total_gradient_norm)
 
 
@@ -97,7 +98,7 @@ class WordReverser(Initializable):
         encoder = Bidirectional(
             SimpleRecurrent(dim=dimension, activation=Tanh()))
         fork = Fork([name for name in encoder.prototype.apply.sequences
-                    if name != 'mask'])
+                     if name != 'mask'])
         fork.input_dim = dimension
         fork.output_dims = {name: dimension for name in fork.input_names}
         lookup = LookupTable(alphabet_size, dimension)
@@ -115,13 +116,6 @@ class WordReverser(Initializable):
         generator = SequenceGenerator(
             readout=readout, transition=transition, attention=attention,
             name="generator")
-
-        encoder2 = Bidirectional(
-            SimpleRecurrent(dim=dimension, activation=Tanh()))
-        fork2 = Fork([name for name in encoder2.prototype.apply.sequences
-                     if name != 'mask'])
-        fork2.input_dim = dimension
-        fork2.output_dims = {name: dimension for name in fork2.input_names}
         transition2 = SimpleRecurrent(
             activation=Tanh(),
             dim=dimension, name="transition2")
@@ -141,12 +135,13 @@ class WordReverser(Initializable):
         self.fork = fork
         self.encoder = encoder
         self.generator = generator
-        self.fork2 = fork2
-        self.encoder2 = encoder2
+        #self.fork2 = fork2
+        #self.encoder2 = encoder2
         self.generator2 = generator2
         self.dimension = dimension
         self.children = [lookup, fork, encoder, generator,
-                         fork2, encoder2, generator2]
+                         #fork2, encoder2,
+                         generator2]
 
     @application
     def cost(self, chars, chars_mask, targets, targets_mask):
@@ -156,7 +151,7 @@ class WordReverser(Initializable):
                 mask=chars_mask))
         _, outputs, _, _, _ = self.generator.generate(
             n_steps=3 * chars.shape[0], batch_size=chars.shape[1],
-            attended=attended, attended_mask=tensor.ones_like(chars))
+            attended=attended, attended_mask=tensor.ones(chars.shape))
         return self.generator2.cost(
             targets, targets_mask,
             attended=outputs,
@@ -278,10 +273,6 @@ def main(mode, save_path, num_batches, data_path=None):
                 average_monitoring,
                 FinishAfter(after_n_batches=num_batches)
                 .add_condition("after_batch", _is_nan),
-                Plot(os.path.basename(save_path),
-                     [[average_monitoring.record_name(cost)],
-                      [average_monitoring.record_name(cost_per_character)]],
-                     every_n_batches=10),
                 SerializeMainLoop(save_path, every_n_batches=500,
                                   save_separately=["model", "log"]),
                 Printing(every_n_batches=1)])
