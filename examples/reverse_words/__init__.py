@@ -232,16 +232,16 @@ def main(mode, save_path, num_batches, data_path=None):
             "character_log_likelihood")
         cg = ComputationGraph(cost)
         r = reverser
-        #(energies,) = VariableFilter(
-        #    application=r.generator2.readout.readout,
-        #    name="output")(cg.variables)
-        #min_energy = named_copy(energies.min(), "min_energy")
-        #max_energy = named_copy(energies.max(), "max_energy")
-        #(activations,) = VariableFilter(
-        #    application=r.generator2.transition.apply,
-        #    name="states")(cg.variables)
-        #mean_activation = named_copy(abs(activations).mean(),
-        #                             "mean_activation")
+        energies = VariableFilter(
+            application=r.generator2.readout.readout,
+            name="output")(cg.variables)[0]
+        min_energy = named_copy(energies.min(), "min_energy")
+        max_energy = named_copy(energies.max(), "max_energy")
+        activations = VariableFilter(
+            application=r.generator2.transition.apply,
+            name="states")(cg.variables)[0]
+        mean_activation = named_copy(abs(activations).mean(),
+                                     "mean_activation")
 
         # Define the training algorithm.
         algorithm = GradientDescent(
@@ -250,9 +250,9 @@ def main(mode, save_path, num_batches, data_path=None):
 
         # More variables for debugging
         observables = [
-            cost, #min_energy, max_energy, mean_activation,
-            #batch_size, max_length, cost_per_character,
-            #algorithm.total_step_norm, algorithm.total_gradient_norm
+            cost, min_energy, max_energy, mean_activation,
+            batch_size, max_length, cost_per_character,
+            algorithm.total_step_norm, algorithm.total_gradient_norm
         ]
         for name, param in params.items():
             observables.append(named_copy(
