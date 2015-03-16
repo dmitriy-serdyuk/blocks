@@ -9,6 +9,7 @@ from theano import tensor, Variable
 
 from blocks.bricks import Initializable, Sigmoid, Tanh
 from blocks.bricks.base import Application, application, Brick, lazy
+from blocks import config
 from blocks.initialization import NdarrayInitialization
 from blocks.roles import add_role, WEIGHTS, BIASES
 from blocks.utils import (pack, shared_floatx_nans, dict_union, dict_subset,
@@ -185,6 +186,8 @@ def recurrent(*args, **kwargs):
                 args = list(args)
                 arg_names = (list(sequences_given) + list(states_given) +
                              list(contexts_given))
+                if config.strict:
+                    arg_names += [param.name for param in brick.params]
                 kwargs = dict(equizip(arg_names, args))
                 kwargs.update(rest_kwargs)
                 outputs = getattr(brick, application_function.__name__)(
@@ -198,12 +201,19 @@ def recurrent(*args, **kwargs):
             outputs_info = (list(states_given.values()) +
                             [None] * (len(application.outputs) -
                                       len(application.states)))
+            if config.strict:
+                shared_vars = list(brick.params)
+                strict = {'strict': True}
+            else:
+                shared_vars = []
+                strict = {}
             result, updates = theano.scan(
                 scan_function, sequences=list(sequences_given.values()),
                 outputs_info=outputs_info,
-                non_sequences=list(contexts_given.values()),
+                non_sequences=list(contexts_given.values()) + shared_vars,
                 n_steps=n_steps,
-                go_backwards=reverse)
+                go_backwards=reverse,
+                **strict)
             result = pack(result)
             if return_initial_states:
                 # Undo Subtensor

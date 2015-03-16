@@ -194,7 +194,8 @@ class GradientDescent(DifferentiableCostMinimizer):
             logger.info("Taking the cost gradient")
             self.gradients = dict(
                 equizip(self.params, tensor.grad(self.cost, self.params,
-                                                 known_grads=known_grads)))
+                                                 known_grads=known_grads,
+                                                 add_names=True)))
             logger.info("The cost gradient computation graph is built")
         else:
             if known_grads:
