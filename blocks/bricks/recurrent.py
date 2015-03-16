@@ -12,6 +12,7 @@ from blocks.bricks.base import Application, application, Brick, lazy
 from blocks import config
 from blocks.initialization import NdarrayInitialization
 from blocks.roles import add_role, WEIGHTS, BIASES
+from blocks.select import Selector
 from blocks.utils import (pack, shared_floatx_nans, dict_union, dict_subset,
                           is_shared_variable, equizip)
 
@@ -186,9 +187,7 @@ def recurrent(*args, **kwargs):
                 args = list(args)
                 arg_names = (list(sequences_given) + list(states_given) +
                              list(contexts_given))
-                if config.strict:
-                    arg_names += [param.name for param in brick.params]
-                kwargs = dict(equizip(arg_names, args))
+                kwargs = dict(zip(arg_names, args))
                 kwargs.update(rest_kwargs)
                 outputs = getattr(brick, application_function.__name__)(
                     iterate=False, **kwargs)
@@ -202,7 +201,10 @@ def recurrent(*args, **kwargs):
                             [None] * (len(application.outputs) -
                                       len(application.states)))
             if config.strict:
-                shared_vars = list(brick.params)
+                # Find all shared variables
+                shared_vars = list(Selector(brick).get_params().values())
+                # Just make `scan_function` discard them before calling
+                # `application_function`
                 strict = {'strict': True}
             else:
                 shared_vars = []
