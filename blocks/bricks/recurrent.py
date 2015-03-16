@@ -200,7 +200,7 @@ def recurrent(*args, **kwargs):
             outputs_info = (list(states_given.values()) +
                             [None] * (len(application.outputs) -
                                       len(application.states)))
-            if config.strict:
+            if config.scan_strict:
                 # Find all shared variables
                 shared_vars = list(Selector(brick).get_params().values())
                 # Just make `scan_function` discard them before calling

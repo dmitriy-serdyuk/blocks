@@ -136,6 +136,6 @@ config = Configuration()
 # Define configuration options
 config.add_config('default_seed', type_=int, default=1)
 config.add_config('recursion_limit', type_=int, default=10000)
-config.add_config('strict', type_=bool, default=False)
+config.add_config('scan_strict', type_=bool, default=False)
 
 config.load_yaml()

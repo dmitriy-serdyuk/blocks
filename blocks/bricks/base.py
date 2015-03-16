@@ -246,7 +246,6 @@ class Application(object):
     def apply(self, bound_application, *args, **kwargs):
         as_dict = kwargs.pop('as_dict', False)
         as_list = kwargs.pop('as_list', False)
-        strict = kwargs.pop('strict', False)
         if as_list and as_dict:
             raise ValueError
 
