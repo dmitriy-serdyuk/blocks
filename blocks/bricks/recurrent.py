@@ -196,7 +196,7 @@ def recurrent(*args, **kwargs):
                 args = list(args)
                 arg_names = (list(sequences_given) + list(states_given) +
                              list(contexts_given))
-                kwargs = dict(equizip(arg_names, args[-len(shared_vars):]))
+                kwargs = dict(equizip(arg_names, args[:-len(shared_vars)]))
                 kwargs.update(rest_kwargs)
                 outputs = getattr(brick, application_function.__name__)(
                     iterate=False, **kwargs)
@@ -206,6 +206,7 @@ def recurrent(*args, **kwargs):
                 application_call.inner_inputs = args
                 application_call.inner_outputs = pack(outputs)
                 return outputs
+
             outputs_info = (list(states_given.values()) +
                             [None] * (len(application.outputs) -
                                       len(application.states)))
