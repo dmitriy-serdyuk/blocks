@@ -182,12 +182,21 @@ def recurrent(*args, **kwargs):
             for name, state in states_given.items():
                 states_given[name] = tensor.unbroadcast(state,
                                                         *range(state.ndim))
+            if config.scan_strict:
+                # Find all shared variables
+                shared_vars = list(Selector(brick).get_params().values())
+                # Just make `scan_function` discard them before calling
+                # `application_function`
+                strict = {'strict': True}
+            else:
+                shared_vars = []
+                strict = {}
 
             def scan_function(*args):
                 args = list(args)
                 arg_names = (list(sequences_given) + list(states_given) +
                              list(contexts_given))
-                kwargs = dict(zip(arg_names, args))
+                kwargs = dict(equizip(arg_names, args[-len(shared_vars):]))
                 kwargs.update(rest_kwargs)
                 outputs = getattr(brick, application_function.__name__)(
                     iterate=False, **kwargs)
@@ -200,15 +209,6 @@ def recurrent(*args, **kwargs):
             outputs_info = (list(states_given.values()) +
                             [None] * (len(application.outputs) -
                                       len(application.states)))
-            if config.scan_strict:
-                # Find all shared variables
-                shared_vars = list(Selector(brick).get_params().values())
-                # Just make `scan_function` discard them before calling
-                # `application_function`
-                strict = {'strict': True}
-            else:
-                shared_vars = []
-                strict = {}
             result, updates = theano.scan(
                 scan_function, sequences=list(sequences_given.values()),
                 outputs_info=outputs_info,
