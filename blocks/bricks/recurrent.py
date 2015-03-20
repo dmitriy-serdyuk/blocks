@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
 import copy
 import inspect
-import warnings
-from collections import OrderedDict
+import logging
 from functools import wraps
 
+from picklable_itertools.extras import equizip
 import theano
 from theano import tensor, Variable
 
-from blocks.bricks import Initializable, Identity, Sigmoid
+from blocks.bricks import Initializable, Sigmoid, Tanh
 from blocks.bricks.base import Application, application, Brick, lazy
 from blocks.initialization import NdarrayInitialization
-from blocks.roles import add_role, WEIGHTS, BIASES
-from blocks.utils import (pack, shared_floatx_zeros, dict_union,
+from blocks.roles import add_role, WEIGHT, BIAS
+from blocks.utils import (pack, shared_floatx_nans, dict_union, dict_subset,
                           is_shared_variable)
+
+logger = logging.getLogger()
+
+unknown_scan_input = """
+
+Your function uses a non-shared variable other than those given \
+by scan explicitly. That can significantly slow down `tensor.grad` \
+call. Did you forget to declare it in `contexts`?"""
 
 
 class BaseRecurrent(Brick):
@@ -98,28 +106,37 @@ def recurrent(*args, **kwargs):
                     problem.
 
             """
-            # Extract arguments related to iteration.
+            # Extract arguments related to iteration and immediately relay the
+            # call to the wrapped function if `iterate=False`
             iterate = kwargs.pop('iterate', True)
+            if not iterate:
+                return application_function(brick, *args, **kwargs)
             reverse = kwargs.pop('reverse', False)
             return_initial_states = kwargs.pop('return_initial_states', False)
 
             # Push everything to kwargs
             for arg, arg_name in zip(args, arg_names):
                 kwargs[arg_name] = arg
-            # Separate sequences, states and contexts
+
+            # Make sure that all arguments for scan are tensor variables
             scan_arguments = (application.sequences + application.states +
                               application.contexts)
+            for arg in scan_arguments:
+                if arg in kwargs:
+                    if kwargs[arg] is None:
+                        del kwargs[arg]
+                    else:
+                        kwargs[arg] = tensor.as_tensor_variable(kwargs[arg])
 
-            # Check what is given and what is not
-            def only_given(arg_names):
-                return OrderedDict((arg_name, kwargs[arg_name])
-                                   for arg_name in arg_names
-                                   if kwargs.get(arg_name))
-            sequences_given = only_given(application.sequences)
-            contexts_given = only_given(application.contexts)
+            # Check which sequence and contexts were provided
+            sequences_given = dict_subset(kwargs, application.sequences,
+                                          must_have=False)
+            contexts_given = dict_subset(kwargs, application.contexts,
+                                         must_have=False)
 
-            # TODO Assumes 1 time dim!
+            # Determine number of steps and batch size.
             if len(sequences_given):
+                # TODO Assumes 1 time dim!
                 shape = list(sequences_given.values())[0].shape
                 if not iterate:
                     batch_size = shape[0]
@@ -137,11 +154,8 @@ def recurrent(*args, **kwargs):
             for value in rest_kwargs.values():
                 if (isinstance(value, Variable) and not
                         is_shared_variable(value)):
-                    warnings.warn(
-                        'Your function uses a non-shared variable other than'
-                        ' those given by scan explicitly. That can'
-                        ' significantly slow down `tensor.grad` call.'
-                        ' Did you forget to declare it in `contexts`?')
+                    logger.warning("unknown input {}".format(value) +
+                                   unknown_scan_input)
 
             # Ensure that all initial states are available.
             for state_name in application.states:
@@ -152,37 +166,38 @@ def recurrent(*args, **kwargs):
                             kwargs[state_name].generate(brick.rng, (1, dim)),
                             batch_size, dim)
                     elif isinstance(kwargs[state_name], Application):
-                        kwargs[state_name] = \
+                        kwargs[state_name] = (
                             kwargs[state_name](state_name, batch_size,
-                                               *args, **kwargs)
+                                               *args, **kwargs))
                 else:
                     # TODO init_func returns 2D-tensor, fails for iterate=False
-                    kwargs[state_name] = \
+                    kwargs[state_name] = (
                         brick.initial_state(state_name, batch_size,
-                                            *args, **kwargs)
+                                            *args, **kwargs))
                     assert kwargs[state_name]
-            states_given = only_given(application.states)
-            assert len(states_given) == len(application.states)
+            states_given = dict_subset(kwargs, application.states)
 
             # Theano issue 1772
             for name, state in states_given.items():
                 states_given[name] = tensor.unbroadcast(state,
                                                         *range(state.ndim))
 
-            # Apply methods
-            if not iterate:
-                return application_function(brick, **kwargs)
-
             def scan_function(*args):
                 args = list(args)
                 arg_names = (list(sequences_given) + list(states_given) +
                              list(contexts_given))
-                kwargs = dict(zip(arg_names, args))
+                kwargs = dict(equizip(arg_names, args))
                 kwargs.update(rest_kwargs)
-                return application_function(brick, **kwargs)
-            outputs_info = (list(states_given.values())
-                            + [None] * (len(application.outputs) -
-                                        len(application.states)))
+                outputs = application(iterate=False, **kwargs)
+                # We want to save the computation graph returned by the
+                # `application_function` when it is called inside the
+                # `theano.scan`.
+                application_call.inner_inputs = args
+                application_call.inner_outputs = pack(outputs)
+                return outputs
+            outputs_info = (list(states_given.values()) +
+                            [None] * (len(application.outputs) -
+                                      len(application.states)))
             result, updates = theano.scan(
                 scan_function, sequences=list(sequences_given.values()),
                 outputs_info=outputs_info,
@@ -199,6 +214,7 @@ def recurrent(*args, **kwargs):
             if updates:
                 application_call.updates = dict_union(application_call.updates,
                                                       updates)
+
             return result
 
         return recurrent_apply
@@ -215,18 +231,11 @@ def recurrent(*args, **kwargs):
         return wrap_application
 
 
-class Recurrent(BaseRecurrent, Initializable):
-    """Simple recurrent layer with optional activation.
+class SimpleRecurrent(BaseRecurrent, Initializable):
+    """The traditional recurrent transition.
 
-    .. todo::
-
-       Implement deep transitions (by using other bricks). Currently, this
-       probably re-implements too much from the Linear brick.
-
-       Other important features:
-
-       * Carrying over hidden state between batches
-       * Return k last hidden states
+    The most well-known recurrent transition: a matrix multiplication,
+    optionally followed by a non-linearity.
 
     Parameters
     ----------
@@ -241,13 +250,9 @@ class Recurrent(BaseRecurrent, Initializable):
 
     """
     @lazy
-    def __init__(self, dim, activation=None, **kwargs):
-        super(Recurrent, self).__init__(**kwargs)
-        if activation is None:
-            activation = Identity()
+    def __init__(self, dim, activation, **kwargs):
+        super(SimpleRecurrent, self).__init__(**kwargs)
         self.dim = dim
-        self.activation = activation
-
         self.children = [activation]
 
     @property
@@ -257,48 +262,40 @@ class Recurrent(BaseRecurrent, Initializable):
     def get_dim(self, name):
         if name == 'mask':
             return 0
-        if name in Recurrent.apply.sequences + Recurrent.apply.states:
+        if name in (SimpleRecurrent.apply.sequences +
+                    SimpleRecurrent.apply.states):
             return self.dim
-        return super(Recurrent, self).get_dim(name)
+        return super(SimpleRecurrent, self).get_dim(name)
 
     def _allocate(self):
-        self.params.append(shared_floatx_zeros((self.dim, self.dim)))
+        self.params.append(shared_floatx_nans((self.dim, self.dim), name="W"))
 
     def _initialize(self):
         self.weights_init.initialize(self.W, self.rng)
 
-    @recurrent(sequences=['input_', 'mask'], states=['state'],
-               outputs=['state'], contexts=[])
-    def apply(self, input_=None, state=None, mask=None):
-        """Given data and mask, apply recurrent layer.
+    @recurrent(sequences=['inputs', 'mask'], states=['states'],
+               outputs=['states'], contexts=[])
+    def apply(self, inputs=None, states=None, mask=None):
+        """Apply the simple transition.
 
         Parameters
         ----------
-        input_ : :class:`~tensor.TensorVariable`
-            The 2 dimensional input, in the shape (batch, features).
-        state : :class:`~tensor.TensorVariable`
-            The 2 dimensional state, in the shape (batch, features).
+        inputs : :class:`~tensor.TensorVariable`
+            The 2D inputs, in the shape (batch, features).
+        states : :class:`~tensor.TensorVariable`
+            The 2D states, in the shape (batch, features).
         mask : :class:`~tensor.TensorVariable`
             A 1D binary array in the shape (batch,) which is 1 if
             there is data available, 0 if not. Assumed to be 1-s
             only if not given.
 
-        .. todo::
-
-           * Mask should become part of ``MaskedTensorVariable`` type so
-             that it can be passed around transparently.
-           * We should stop assuming that batches are the second dimension,
-             in order to support nested RNNs i.e. where the first n axes
-             are time, n + 1 is the batch, and n + 2, ... are features.
-             Masks will become n + 1 dimensional as well then.
-
         """
-        next_state = input_ + tensor.dot(state, self.W)
-        next_state = self.activation.apply(next_state)
+        next_states = inputs + tensor.dot(states, self.W)
+        next_states = self.children[0].apply(next_states)
         if mask:
-            next_state = (mask[:, None] * next_state +
-                          (1 - mask[:, None]) * state)
-        return next_state
+            next_states = (mask[:, None] * next_states +
+                           (1 - mask[:, None]) * states)
+        return next_states
 
 
 class LSTM(BaseRecurrent, Initializable):
@@ -329,6 +326,9 @@ class LSTM(BaseRecurrent, Initializable):
     ----------
     dim : int
         The dimension of the hidden state.
+    activation : :class:`.Brick`, optional
+        The activation function. The default and by far the most popular
+        is :class:`.Tanh`.
 
     Notes
     -----
@@ -336,9 +336,13 @@ class LSTM(BaseRecurrent, Initializable):
 
     """
     @lazy
-    def __init__(self, dim, **kwargs):
+    def __init__(self, dim, activation=None, **kwargs):
         super(LSTM, self).__init__(**kwargs)
         self.dim = dim
+
+        if not activation:
+            activation = Tanh()
+        self.children = [activation]
 
     def get_dim(self, name):
         if name == 'inputs':
@@ -350,20 +354,20 @@ class LSTM(BaseRecurrent, Initializable):
         return super(LSTM, self).get_dim(name)
 
     def _allocate(self):
-        self.W_state = shared_floatx_zeros((self.dim, 4*self.dim),
-                                           name='W_state')
-        self.W_cell_to_in = shared_floatx_zeros((self.dim,),
-                                                name='W_cell_to_in')
-        self.W_cell_to_forget = shared_floatx_zeros((self.dim,),
-                                                    name='W_cell_to_forget')
-        self.W_cell_to_out = shared_floatx_zeros((self.dim,),
-                                                 name='W_cell_to_out')
-        self.biases = shared_floatx_zeros((4*self.dim,), name='biases')
-        add_role(self.W_state, WEIGHTS)
-        add_role(self.W_cell_to_in, WEIGHTS)
-        add_role(self.W_cell_to_forget, WEIGHTS)
-        add_role(self.W_cell_to_out, WEIGHTS)
-        add_role(self.biases, BIASES)
+        self.W_state = shared_floatx_nans((self.dim, 4*self.dim),
+                                          name='W_state')
+        self.W_cell_to_in = shared_floatx_nans((self.dim,),
+                                               name='W_cell_to_in')
+        self.W_cell_to_forget = shared_floatx_nans((self.dim,),
+                                                   name='W_cell_to_forget')
+        self.W_cell_to_out = shared_floatx_nans((self.dim,),
+                                                name='W_cell_to_out')
+        self.biases = shared_floatx_nans((4*self.dim,), name='biases')
+        add_role(self.W_state, WEIGHT)
+        add_role(self.W_cell_to_in, WEIGHT)
+        add_role(self.W_cell_to_forget, WEIGHT)
+        add_role(self.W_cell_to_out, WEIGHT)
+        add_role(self.biases, BIAS)
 
         self.params = [self.W_state, self.W_cell_to_in, self.W_cell_to_forget,
                        self.W_cell_to_out, self.biases]
@@ -403,6 +407,7 @@ class LSTM(BaseRecurrent, Initializable):
         """
         def slice_last(x, no):
             return x.T[no*self.dim: (no+1)*self.dim].T
+        nonlinearity = self.children[0].apply
 
         activation = tensor.dot(states, self.W_state) + inputs + self.biases
         in_gate = tensor.nnet.sigmoid(slice_last(activation, 0) +
@@ -410,10 +415,10 @@ class LSTM(BaseRecurrent, Initializable):
         forget_gate = tensor.nnet.sigmoid(slice_last(activation, 1) +
                                           cells * self.W_cell_to_forget)
         next_cells = (forget_gate * cells +
-                      in_gate * tensor.tanh(slice_last(activation, 2)))
+                      in_gate * nonlinearity(slice_last(activation, 2)))
         out_gate = tensor.nnet.sigmoid(slice_last(activation, 3) +
                                        next_cells * self.W_cell_to_out)
-        next_states = out_gate * tensor.tanh(next_cells)
+        next_states = out_gate * nonlinearity(next_cells)
 
         if mask:
             next_states = (mask[:, None] * next_states +
@@ -433,14 +438,14 @@ class GatedRecurrent(BaseRecurrent, Initializable):
 
     Parameters
     ----------
-    activation : :class:`.Brick` or None
-        The brick to apply as activation. If ``None`` an
-        :class:`.bricks.Identity` brick is used.
-    gated_activation : :class:`.Brick` or None
-        The brick to apply as activation for gates. If ``None`` a
-        :class:`.Sigmoid` brick is used.
     dim : int
         The dimension of the hidden state.
+    activation : :class:`.Brick` or None
+        The brick to apply as activation. If ``None`` a
+        :class:`.Tanh` brick is used.
+    gate_activation : :class:`.Brick` or None
+        The brick to apply as activation for gates. If ``None`` a
+        :class:`.Sigmoid` brick is used.
     use_upgate_gate : bool
         If True the update gates are used.
     use_reset_gate : bool
@@ -457,7 +462,7 @@ class GatedRecurrent(BaseRecurrent, Initializable):
 
     """
     @lazy
-    def __init__(self, activation, gate_activation, dim,
+    def __init__(self, dim, activation=None, gate_activation=None,
                  use_update_gate=True, use_reset_gate=True, **kwargs):
         super(GatedRecurrent, self).__init__(**kwargs)
         self.dim = dim
@@ -465,7 +470,7 @@ class GatedRecurrent(BaseRecurrent, Initializable):
         self.use_reset_gate = use_reset_gate
 
         if not activation:
-            activation = Identity()
+            activation = Tanh()
         if not gate_activation:
             gate_activation = Sigmoid()
         self.activation = activation
@@ -494,7 +499,7 @@ class GatedRecurrent(BaseRecurrent, Initializable):
 
     def _allocate(self):
         def new_param(name):
-            return shared_floatx_zeros((self.dim, self.dim), name=name)
+            return shared_floatx_nans((self.dim, self.dim), name=name)
 
         self.params.append(new_param('state_to_state'))
         self.params.append(new_param('state_to_update')
@@ -559,12 +564,12 @@ class GatedRecurrent(BaseRecurrent, Initializable):
         if self.use_update_gate:
             update_values = self.gate_activation.apply(
                 states.dot(self.state_to_update) + update_inputs)
-            next_states = (next_states * update_values
-                           + states * (1 - update_values))
+            next_states = (next_states * update_values +
+                           states * (1 - update_values))
 
         if mask:
-            next_states = (mask[:, None] * next_states
-                           + (1 - mask[:, None]) * states)
+            next_states = (mask[:, None] * next_states +
+                           (1 - mask[:, None]) * states)
 
         return next_states
 
@@ -609,9 +614,9 @@ class Bidirectional(Initializable):
     @application
     def apply(self, *args, **kwargs):
         """Applies forward and backward networks and concatenates outputs."""
-        forward = self.children[0].apply(return_list=True, *args, **kwargs)
+        forward = self.children[0].apply(as_list=True, *args, **kwargs)
         backward = [x[::-1] for x in
-                    self.children[1].apply(reverse=True, return_list=True,
+                    self.children[1].apply(reverse=True, as_list=True,
                                            *args, **kwargs)]
         return [tensor.concatenate([f, b], axis=2)
-                for f, b in zip(forward, backward)]
+                for f, b in equizip(forward, backward)]

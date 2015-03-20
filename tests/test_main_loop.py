@@ -1,28 +1,16 @@
-from six import BytesIO
-
-import dill
+from fuel.datasets import IterableDataset
+from six.moves import cPickle
 
 from blocks.main_loop import MainLoop
-from blocks.datasets import ContainerDataset
-from blocks.extensions import FinishAfter
+from blocks.extensions import TrainingExtension, FinishAfter
 from blocks.utils import unpack
+from tests import MockAlgorithm
 
 
-class MockAlgorithm(object):
-    """An algorithm that only saves data to the log.
-
-    Also checks that the initialization routine is only called once.
-
-    """
-    def __init__(self):
-        self._initialized = False
-
-    def initialize(self):
-        assert not self._initialized
-        self._initialized = True
-
-    def process_batch(self, batch):
-        self.log.current_row.batch = batch
+class WriteBatchExtension(TrainingExtension):
+    """Writes data saved by MockAlgorithm to the log."""
+    def after_batch(self, _):
+        self.main_loop.log.current_row.batch = self.main_loop.algorithm.batch
 
 
 def test_main_loop():
@@ -47,31 +35,30 @@ def test_main_loop():
     finish_extension = FinishAfter()
     finish_extension.add_condition(
         'after_epoch', predicate=lambda log: log.status.epochs_done == 2)
-    main_loop = MainLoop(None, TestDataStream(), MockAlgorithm(),
-                         None, [finish_extension])
+    main_loop = MainLoop(MockAlgorithm(), TestDataStream(),
+                         extensions=[WriteBatchExtension(),
+                                     finish_extension])
     main_loop.run()
 
     assert main_loop.log.status.iterations_done == 5
     assert main_loop.log.status._epoch_ends == [3, 5]
     assert len(list(main_loop.log)) == 7
-    for i in range(5):
-        assert main_loop.log[i].batch == dict(data=i + 1)
+    for i in range(1, 6):
+        assert main_loop.log[i].batch == dict(data=i)
 
 
 def test_training_resumption():
     def do_test(with_serialization):
-        data_stream = ContainerDataset(range(10)).get_default_stream()
+        data_stream = IterableDataset(range(10)).get_example_stream()
         main_loop = MainLoop(
-            None, data_stream, MockAlgorithm(),
-            extensions=[FinishAfter(after_n_batches=14)])
+            MockAlgorithm(), data_stream,
+            extensions=[WriteBatchExtension(),
+                        FinishAfter(after_n_batches=14)])
         main_loop.run()
         assert main_loop.log.status.iterations_done == 14
 
         if with_serialization:
-            string_io = BytesIO()
-            dill.dump(main_loop, string_io, fmode=dill.CONTENTS_FMODE)
-            string_io.seek(0)
-            main_loop = dill.load(string_io)
+            main_loop = cPickle.loads(cPickle.dumps(main_loop))
 
         finish_after = unpack(
             [ext for ext in main_loop.extensions
@@ -83,7 +70,7 @@ def test_training_resumption():
         assert main_loop.log.status.iterations_done == 27
         assert main_loop.log.status.epochs_done == 2
         for i in range(27):
-            assert main_loop.log[i].batch == {"data": i % 10}
+            assert main_loop.log[i + 1].batch == {"data": i % 10}
 
     do_test(False)
     do_test(True)

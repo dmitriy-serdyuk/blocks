@@ -4,7 +4,8 @@ import logging
 
 from blocks.extensions import SimpleExtension, TrainingExtension
 from blocks.dump import MainLoopDumpManager
-from blocks.utils import reraise_as, secure_dill_dump
+from blocks.utils import reraise_as
+from blocks.serialization import secure_pickle_dump
 
 logger = logging.getLogger(__name__)
 
@@ -12,14 +13,17 @@ LOADED_FROM = "loaded_from"
 SAVED_TO = "saved_to"
 
 
-class SerializeMainLoop(SimpleExtension):
+class Checkpoint(SimpleExtension):
     """Saves a pickled version of the main loop to the disk.
 
     The pickled main loop can be later reloaded and training can be
     resumed.
 
     Makes a `SAVED_TO` record in the log with the serialization destination
-    in the case of success and ``None`` in the case of failure.
+    in the case of success and ``None`` in the case of failure. The
+    value of the record is a tuple of paths to which saving was done
+    (there can be more than one if the user added a condition
+    with an argument, see :meth:`do` docs).
 
     Parameters
     ----------
@@ -34,8 +38,6 @@ class SerializeMainLoop(SimpleExtension):
 
     Notes
     -----
-    Instead of the standard pickling library, the dill package is used.
-
     Using pickling for saving the whole main loop object comes with
     certain limitations:
 
@@ -48,7 +50,7 @@ class SerializeMainLoop(SimpleExtension):
     """
     def __init__(self, path, save_separately=None, **kwargs):
         kwargs.setdefault("after_training", True)
-        super(SerializeMainLoop, self).__init__(**kwargs)
+        super(Checkpoint, self).__init__(**kwargs)
 
         self.path = path
         self.save_separately = save_separately
@@ -57,14 +59,28 @@ class SerializeMainLoop(SimpleExtension):
             self.save_separately = []
 
     def do(self, callback_name, *args):
-        """Pickle the main loop object to the disk."""
+        """Pickle the main loop object to the disk.
+
+        If `*args` contain an argument from user, it is treated as
+        saving path to be used instead of the one given at the
+        construction stage.
+
+        """
+        from_main_loop, from_user = self.parse_args(callback_name, args)
         try:
-            self.main_loop.log.current_row[SAVED_TO] = self.path
-            secure_dill_dump(self.main_loop, self.path)
+            path = self.path
+            if len(from_user):
+                path, = from_user
+            already_saved_to = self.main_loop.log.current_row[SAVED_TO]
+            if not already_saved_to:
+                already_saved_to = ()
+            self.main_loop.log.current_row[SAVED_TO] = (
+                already_saved_to + (path,))
+            secure_pickle_dump(self.main_loop, path)
             for attribute in self.save_separately:
-                root, ext = os.path.splitext(self.path)
+                root, ext = os.path.splitext(path)
                 path = root + "_" + attribute + ext
-                secure_dill_dump(getattr(self.main_loop, attribute), path)
+                secure_pickle_dump(getattr(self.main_loop, attribute), path)
         except Exception:
             self.main_loop.log.current_row[SAVED_TO] = None
             raise
@@ -124,7 +140,7 @@ class Dump(SimpleExtension):
         super(Dump, self).__init__(**kwargs)
         self.manager = MainLoopDumpManager(state_path)
 
-    def do(self, callback_name, **kwargs):
+    def do(self, callback_name, *args, **kwargs):
         try:
             self.main_loop.log.current_row[SAVED_TO] = (
                 self.manager.folder)

@@ -5,13 +5,15 @@ import numpy
 import theano
 from numpy.testing import assert_allclose
 from theano import tensor
+from theano.gof.graph import is_same_graph
 
+from blocks.bricks.base import application
 from blocks.bricks import Tanh
-from blocks.bricks.recurrent import (GatedRecurrent,
-                                     Recurrent,
-                                     Bidirectional,
-                                     LSTM)
+from blocks.bricks.recurrent import (
+    GatedRecurrent, SimpleRecurrent, Bidirectional, LSTM)
 from blocks.initialization import Constant, IsotropicGaussian, Orthogonal
+from blocks.filter import get_application_call, VariableFilter
+from blocks.graph import ComputationGraph
 
 
 floatX = theano.config.floatX
@@ -19,8 +21,8 @@ floatX = theano.config.floatX
 
 class TestRecurrent(unittest.TestCase):
     def setUp(self):
-        self.simple = Recurrent(dim=3, weights_init=Constant(2),
-                                activation=Tanh())
+        self.simple = SimpleRecurrent(dim=3, weights_init=Constant(2),
+                                      activation=Tanh())
         self.simple.initialize()
 
     def test_one_step(self):
@@ -143,13 +145,13 @@ class TestLSTM(unittest.TestCase):
 class TestGatedRecurrent(unittest.TestCase):
     def setUp(self):
         self.gated = GatedRecurrent(
-            dim=3, weights_init=Constant(2),
-            activation=Tanh(), gate_activation=Tanh())
+            dim=3, activation=Tanh(),
+            gate_activation=Tanh(), weights_init=Constant(2))
         self.gated.initialize()
         self.reset_only = GatedRecurrent(
-            dim=3, weights_init=IsotropicGaussian(),
-            activation=Tanh(), gate_activation=Tanh(),
-            use_update_gate=False, seed=1)
+            dim=3, activation=Tanh(),
+            gate_activation=Tanh(), use_update_gate=False,
+            weights_init=IsotropicGaussian(), seed=1)
         self.reset_only.initialize()
 
     def test_one_step(self):
@@ -170,8 +172,8 @@ class TestGatedRecurrent(unittest.TestCase):
 
         z_val = numpy.tanh(h0_val.dot(W_val) + zi_val)
         r_val = numpy.tanh(h0_val.dot(W_val) + ri_val)
-        h1_val = (z_val * numpy.tanh((r_val * h0_val).dot(W_val) + x_val)
-                  + (1 - z_val) * h0_val)
+        h1_val = (z_val * numpy.tanh((r_val * h0_val).dot(W_val) + x_val) +
+                  (1 - z_val) * h0_val)
         assert_allclose(h1_val, next_h(h0_val, x_val, zi_val, ri_val)[0],
                         rtol=1e-6)
 
@@ -194,8 +196,8 @@ class TestGatedRecurrent(unittest.TestCase):
 
         for i in range(1, 25):
             r_val = numpy.tanh(h_val[i - 1].dot(U) + ri_val[i - 1])
-            h_val[i] = numpy.tanh((r_val * h_val[i - 1]).dot(W)
-                                  + x_val[i - 1])
+            h_val[i] = numpy.tanh((r_val * h_val[i - 1]).dot(W) +
+                                  x_val[i - 1])
             h_val[i] = (mask_val[i - 1, :, None] * h_val[i] +
                         (1 - mask_val[i - 1, :, None]) * h_val[i - 1])
         h_val = h_val[1:]
@@ -206,18 +208,21 @@ class TestGatedRecurrent(unittest.TestCase):
 class TestBidirectional(unittest.TestCase):
     def setUp(self):
         self.bidir = Bidirectional(weights_init=Orthogonal(),
-                                   prototype=Recurrent(
-                                       dim=3, activation=Tanh()),
-                                   seed=1)
-        self.simple = Recurrent(dim=3, weights_init=Orthogonal(),
-                                activation=Tanh(), seed=1)
-        self.bidir.initialize()
+                                   prototype=SimpleRecurrent(
+                                       dim=3, activation=Tanh()))
+        self.simple = SimpleRecurrent(dim=3, weights_init=Orthogonal(),
+                                      activation=Tanh(), seed=1)
+        self.bidir.allocate()
         self.simple.initialize()
+        self.bidir.children[0].params[0].set_value(
+            self.simple.params[0].get_value())
+        self.bidir.children[1].params[0].set_value(
+            self.simple.params[0].get_value())
         self.x_val = 0.1 * numpy.asarray(
             list(itertools.permutations(range(4))),
             dtype=floatX)
-        self.x_val = (numpy.ones((24, 4, 3), dtype=floatX)
-                      * self.x_val[..., None])
+        self.x_val = (numpy.ones((24, 4, 3), dtype=floatX) *
+                      self.x_val[..., None])
         self.mask_val = numpy.ones((24, 4), dtype=floatX)
         self.mask_val[12:24, 3] = 0
 
@@ -234,3 +239,43 @@ class TestBidirectional(unittest.TestCase):
 
         assert_allclose(h_simple, h_bidir[..., :3], rtol=1e-04)
         assert_allclose(h_simple_rev, h_bidir[::-1, ...,  3:], rtol=1e-04)
+
+
+def test_saved_inner_graph():
+    """Make sure that the original inner graph is saved."""
+    x = tensor.tensor3()
+    recurrent = SimpleRecurrent(dim=3, activation=Tanh())
+    y = recurrent.apply(x)
+
+    application_call = get_application_call(y)
+    assert application_call.inner_inputs
+    assert application_call.inner_outputs
+
+    cg = ComputationGraph(application_call.inner_outputs)
+    # Check that the inner scan graph is annotated
+    # with `recurrent.apply`
+    assert len(VariableFilter(application=recurrent.apply)(cg)) == 3
+    # Check that the inner graph is equivalent to the one
+    # produced by a stand-alone of `recurrent.apply`
+    assert is_same_graph(application_call.inner_outputs[0],
+                         recurrent.apply(*application_call.inner_inputs,
+                                         iterate=False))
+
+
+def test_super_in_recurrent_overrider():
+    # A regression test for the issue #475
+    class SimpleRecurrentWithContext(SimpleRecurrent):
+        @application(contexts=['context'])
+        def apply(self, context, *args, **kwargs):
+            kwargs['inputs'] += context
+            return super(SimpleRecurrentWithContext, self).apply(*args,
+                                                                 **kwargs)
+
+        @apply.delegate
+        def apply_delegate(self):
+            return super(SimpleRecurrentWithContext, self).apply
+
+    brick = SimpleRecurrentWithContext(100, Tanh())
+    inputs = tensor.tensor3('inputs')
+    context = tensor.matrix('context').dimshuffle('x', 0, 1)
+    brick.apply(context, inputs=inputs)

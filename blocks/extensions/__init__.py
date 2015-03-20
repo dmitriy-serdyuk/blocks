@@ -1,9 +1,20 @@
 from __future__ import print_function
+
 import time
+import logging
+import progressbar
 
 from abc import ABCMeta, abstractmethod
 
 from six import add_metaclass
+from toolz import first
+
+logger = logging.getLogger()
+
+
+def callback(func):
+    func._is_callback = True
+    return func
 
 
 class TrainingExtension(object):
@@ -55,19 +66,29 @@ class TrainingExtension(object):
         simply invokes the callback by its name.
 
         """
-        getattr(self, callback_name)(*args)
+        getattr(self, str(callback_name))(*args)
 
+    @callback
     def on_resumption(self):
         """The callback invoked after training is resumed."""
+        pass
 
+    @callback
+    def on_error(self):
+        """The callback invoked when an error occurs."""
+        pass
+
+    @callback
     def before_training(self):
         """The callback invoked before training is started."""
         pass
 
+    @callback
     def before_epoch(self):
         """The callback invoked before starting an epoch."""
         pass
 
+    @callback
     def before_batch(self, batch):
         """The callback invoked before a batch is processed.
 
@@ -79,6 +100,7 @@ class TrainingExtension(object):
         """
         pass
 
+    @callback
     def after_batch(self, batch):
         """The callback invoked after a batch is processed.
 
@@ -90,17 +112,62 @@ class TrainingExtension(object):
         """
         pass
 
+    @callback
     def after_epoch(self):
         """The callback invoked after an epoch is finished."""
         pass
 
+    @callback
     def after_training(self):
         """The callback invoked after training is finished."""
         pass
 
+    @callback
     def on_interrupt(self):
         """The callback invoked when training is interrupted."""
         pass
+
+
+class CallbackName(str):
+    """A name of a TrainingExtension callback.
+
+    Raises
+    ------
+    :class:`TypeError` on comparison with a string which is not a name of
+    TrainingExtension callback.
+
+    """
+    def __eq__(self, other):
+        callback_names = [key for key, value
+                          in TrainingExtension.__dict__.items()
+                          if getattr(value, '_is_callback', False)]
+        if other not in callback_names:
+            raise TypeError("{} is not a valid callback.".format(other))
+        return str(self) == other
+
+
+class Predicate(object):
+    def __init__(self, condition, num):
+        self.condition = condition
+        self.num = num
+
+    def __call__(self, log):
+        if self.condition.endswith('epochs'):
+            entry = log.status.epochs_done
+        else:
+            entry = log.status.iterations_done
+        if self.condition.startswith('every'):
+            return entry % self.num == 0
+        else:
+            return entry == self.num
+
+
+def has_done_epochs(log):
+    return log.status.epochs_done == 0
+
+
+def always_true(log):
+    return True
 
 
 @add_metaclass(ABCMeta)
@@ -125,9 +192,9 @@ class SimpleExtension(TrainingExtension):
         If ``True``, :meth:`do` is invoked when training is resumed.
     on_interrupt : bool, optional
         If ``True``, :meth:`do` is invoked when training is interrupted.
-    after_every_epoch : bool
+    after_epoch : bool
         If ``True``, :meth:`do` is invoked after every epoch.
-    after_every_batch: bool
+    after_batch: bool
         If ``True``, :meth:`do` is invoked after every batch.
     after_training : bool
         If ``True``, :meth:`do` is invoked after training.
@@ -145,7 +212,7 @@ class SimpleExtension(TrainingExtension):
     """
     BOOLEAN_TRIGGERS = frozenset(["before_training", "before_first_epoch",
                                   "on_resumption", "on_interrupt",
-                                  "after_every_epoch", "after_every_batch",
+                                  "after_epoch", "after_batch",
                                   "after_training"])
 
     INTEGER_TRIGGERS = frozenset(["after_n_epochs", "after_n_batches",
@@ -174,22 +241,11 @@ class SimpleExtension(TrainingExtension):
 
         """
         self._conditions[:] = []
-        predicates = {'before_first_epoch':
-                      lambda log: log.status.epochs_done == 0}
-        predicate_factories = {
-            'every_n_batches': lambda n_batches:
-                lambda log: log.status.iterations_done % n_batches == 0,
-            'after_n_batches': lambda n_batches:
-                lambda log: log.status.iterations_done == n_batches,
-            'every_n_epochs': lambda n_epochs:
-                lambda log: log.status.epochs_done % n_epochs == 0,
-            'after_n_epochs': lambda n_epochs:
-                lambda log: log.status.epochs_done == n_epochs,
-        }
+        predicates = {'before_first_epoch': has_done_epochs}
         conditions = {
             'before_first_epoch': 'before_epoch',
-            'after_every_epoch': 'after_epoch',
-            'after_every_batch': 'after_batch',
+            'after_epoch': 'after_epoch',
+            'after_batch': 'after_batch',
             'every_n_batches': 'after_batch',
             'every_n_epochs': 'after_epoch',
             'after_n_batches': 'after_batch',
@@ -197,15 +253,16 @@ class SimpleExtension(TrainingExtension):
         }
         # Freeze the keys as a list so that we can safely modify kwargs.
         for key, value in kwargs.items():
-            if key in self.BOOLEAN_TRIGGERS and value:
-                self.add_condition(conditions.get(key, key),
-                                   predicate=predicates.get(key, None))
-            elif key in self.INTEGER_TRIGGERS and value:
-                predicate = predicate_factories.get(key, lambda: None)(value)
-                self.add_condition(conditions.get(key, key),
-                                   predicate=predicate)
-            else:
-                raise KeyError("Invalid condition: {}".format(key))
+            if value:
+                if key in self.BOOLEAN_TRIGGERS:
+                    self.add_condition(conditions.get(key, key),
+                                       predicate=predicates.get(key, None))
+                elif key in self.INTEGER_TRIGGERS:
+                    predicate = Predicate(key, value)
+                    self.add_condition(conditions.get(key, key),
+                                       predicate=predicate)
+                else:
+                    raise KeyError("Invalid condition: {}".format(key))
         return self  # For chaining calls.
 
     def add_condition(self, callback_name, predicate=None, arguments=None):
@@ -233,7 +290,7 @@ class SimpleExtension(TrainingExtension):
         if not arguments:
             arguments = []
         if not predicate:
-            self._conditions.append((callback_name, lambda log: True,
+            self._conditions.append((callback_name, always_true,
                                      arguments))
         else:
             self._conditions.append((callback_name, predicate,
@@ -268,9 +325,36 @@ class SimpleExtension(TrainingExtension):
 
         """
         for callback_name, predicate, arguments in self._conditions:
-            if (callback_name == callback_invoked
-                    and predicate(self.main_loop.log)):
+            if (callback_name == callback_invoked and
+                    predicate(self.main_loop.log)):
                 self.do(callback_invoked, *(from_main_loop + tuple(arguments)))
+
+    @staticmethod
+    def parse_args(which_callback, args):
+        """Separates :meth:`do` arguments coming from different sources.
+
+        When a :meth:`do` method receives arguments from both the main
+        loop (e.g. a batch) and the user, it often has to separate them.
+        This method is the right tool to use.
+
+        Parameters
+        ----------
+        which_callback : str
+            The name of the callback.
+        args : iterable
+            The arguments.
+
+        Returns
+        -------
+        from_main_loop : tuple
+        from_user : tuple
+
+        """
+        args = tuple(args)
+        if (which_callback == 'after_batch' or
+                which_callback == 'before_batch'):
+            return (args[0],), args[1:]
+        return (), args
 
 
 class FinishAfter(SimpleExtension):
@@ -288,12 +372,12 @@ class Printing(SimpleExtension):
         kwargs.setdefault("before_first_epoch", True)
         kwargs.setdefault("on_resumption", True)
         kwargs.setdefault("after_training", True)
-        kwargs.setdefault("after_every_epoch", True)
+        kwargs.setdefault("after_epoch", True)
         kwargs.setdefault("on_interrupt", True)
         super(Printing, self).__init__(**kwargs)
 
     def _print_attributes(self, attribute_tuples):
-        for attr, value in sorted(attribute_tuples, key=lambda t: t[0]):
+        for attr, value in sorted(attribute_tuples, key=first):
             if not attr.startswith("_"):
                 print("\t", "{}:".format(attr), value)
 
@@ -322,6 +406,95 @@ class Printing(SimpleExtension):
                 log.status.iterations_done))
             self._print_attributes(log.current_row)
         print()
+
+
+class ProgressBar(TrainingExtension):
+    """Display a progress bar during training.
+
+    This extension tries to infer the number of iterations per epoch
+    by querying the `num_batches`, `num_examples` and `batch_size`
+    attributes from the :class:`IterationScheme`. When this information is
+    not available it will display a simplified progress bar that does not
+    include the estimated time until the end of this epoch.
+
+    Notes
+    -----
+    This extension should be run before other extensions that print to
+    the screen at the end or at the beginning of the epoch (e.g. the
+    :class:`Printing` extension). Placing ProgressBar before these
+    extension will ensure you won't get intermingled output on your
+    terminal.
+
+    """
+    def __init__(self, **kwargs):
+        super(ProgressBar, self).__init__(**kwargs)
+        self.bar = None
+        self.iter_count = 0
+
+    def __getstate__(self):
+        # Ensure we won't pickle the actual progress bar.
+        # (It might contain unpicklable file handles)
+        state = dict(self.__dict__)
+        del state['bar']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.bar = None
+
+    def get_iter_per_epoch(self):
+        """Try to infer the number of iterations per epoch."""
+        iter_scheme = self.main_loop.data_stream.iteration_scheme
+        if hasattr(iter_scheme, 'num_batches'):
+            return iter_scheme.num_batches
+        elif (hasattr(iter_scheme, 'num_examples') and
+                hasattr(iter_scheme, 'batch_size')):
+            return iter_scheme.num_examples // iter_scheme.batch_size
+        return None
+
+    def create_bar(self):
+        """Create a new progress bar.
+
+        Calls `self.get_iter_per_epoch()`, selects an appropriate
+        set of widgets and creates a ProgressBar.
+
+        """
+        iter_per_epoch = self.get_iter_per_epoch()
+        epochs_done = self.main_loop.log._status.epochs_done
+
+        if iter_per_epoch is None:
+            widgets = ["Epoch {}, step ".format(epochs_done),
+                       progressbar.Counter(), ' ',
+                       progressbar.BouncingBar(), ' ',
+                       progressbar.Timer()]
+            iter_per_epoch = progressbar.UnknownLength
+        else:
+            widgets = ["Epoch {}, step ".format(epochs_done),
+                       progressbar.Counter(),
+                       ' (', progressbar.Percentage(), ') ',
+                       progressbar.Bar(), ' ',
+                       progressbar.Timer(), ' ', progressbar.ETA()]
+
+        return progressbar.ProgressBar(widgets=widgets,
+                                       maxval=iter_per_epoch)
+
+    def before_epoch(self):
+        self.iter_count = 0
+
+    def after_epoch(self):
+        if self.bar is None:
+            return
+
+        self.bar.finish()
+        self.bar = None
+
+    def before_batch(self, batch):
+        if self.bar is None:
+            self.bar = self.create_bar()
+            self.bar.start()
+
+        self.iter_count += 1
+        self.bar.update(self.iter_count)
 
 
 class Timing(TrainingExtension):

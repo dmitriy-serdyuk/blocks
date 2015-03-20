@@ -5,8 +5,11 @@ build:
       - pip install -q git+git://github.com/bartvm/pep257.git@numpy
   tests:
     override:
-      - flake8 blocks bin tests examples
-      - pep257 blocks bin tests examples --numpy --ignore=D100,D101,D102,D103
+      - flake8 --filename=* bin
+      - flake8 blocks doctests tests examples
+      - pep257 bin --numpy --ignore=D100,D101,D102,D103 --match='.*'
+      - pep257 blocks examples --numpy --ignore=D100,D101,D102,D103
+      - pep257 doctests tests --numpy --ignore=D100,D101,D102,D103 --match='.*\.py'
 checks:
     python:
         code_rating: true
@@ -152,3 +155,7 @@ checks:
         basic_bad_reversed_sequence: true
         basic_assert_on_tuple: true
         basic_abstract_class_instantiated: true
+filter:
+    paths:
+        - blocks/*
+        - bin/*

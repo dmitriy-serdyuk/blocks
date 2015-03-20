@@ -50,11 +50,13 @@ extensions = [
 intersphinx_mapping = {
     'theano': ('http://theano.readthedocs.org/en/latest/', None),
     'numpy': ('http://docs.scipy.org/doc/numpy/', None),
+    'scipy': ('http://docs.scipy.org/doc/scipy/reference/', None),
     'python': ('http://docs.python.org/3.4', None),
     'pandas': ('http://pandas.pydata.org/pandas-docs/stable/', None)
 }
 
 graphviz_dot_args = ['-Gbgcolor=#fcfcfc']  # To match the RTD theme
+graphviz_output_format = 'svg' # To produce SVG figures
 
 # Render todo lists
 todo_include_todos = True
@@ -295,7 +297,8 @@ def skip_abc(app, what, name, obj, skip, options):
 
 def fix_apply(app, what, name, obj, options, signature, return_annotation):
     if isinstance(obj, Application):
-        args, varargs, keywords, defaults = inspect.getargspec(obj.application)
+        args, varargs, keywords, defaults = \
+            inspect.getargspec(obj.application_function)
         positional_args = args[1:] if not defaults else args[:-len(defaults)]
         keyword_args = [] if not defaults else args[-len(defaults):]
         signature = '(' + ', '.join(positional_args)
@@ -307,7 +310,7 @@ def fix_apply(app, what, name, obj, options, signature, return_annotation):
         if keywords:
             signature += ', **' + keywords
         signature += ')'
-    for key, attr in getattr(obj, '__dict__', {}).items():
+    for key, attr in list(getattr(obj, '__dict__', {}).items()):
         if key.startswith('_abc'):
             delattr(obj, key)
     return signature, return_annotation

@@ -1,7 +1,6 @@
 import inspect
 from abc import ABCMeta
 from collections import OrderedDict, MutableSequence
-from functools import update_wrapper
 from types import MethodType
 
 import six
@@ -31,38 +30,64 @@ def create_unbound_method(func, cls):
 property_ = property
 
 
-class Parameters(MutableSequence):
-    """Behaves exactly like a list, but annotates the variables."""
-    def __init__(self, brick, params):
+@add_metaclass(ABCMeta)
+class BrickList(MutableSequence):
+    """Like a list, but performs operations on insert/delete."""
+    def __init__(self, brick, items):
         self.brick = brick
-        self._params = []
-        for param in params:
-            self.append(param)
+        self._items = []
+        for item in items:
+            self.append(item)
 
     def __repr__(self):
-        return repr(self._params)
+        return repr(self._items)
+
+    def __eq__(self, other):
+        return self._items == other
 
     def __getitem__(self, key):
-        return self._params[key]
+        return self._items[key]
 
-    def _annotate(self, value):
+    def _set(self, key, value):
+        pass
+
+    def _del(self, key):
+        pass
+
+    def __setitem__(self, key, value):
+        self._set(value)
+        self._items[key] = value
+
+    def __delitem__(self, key):
+        self._del(key)
+        del self._items[key]
+
+    def __len__(self):
+        return len(self._items)
+
+    def insert(self, key, value):
+        self._set(key, value)
+        self._items.insert(key, value)
+
+
+class Parameters(BrickList):
+    """Adds the PARAMETER role to parameters automatically."""
+    def _set(self, key, value):
         if isinstance(value, Variable):
             add_role(value, PARAMETER)
             add_annotation(value, self.brick)
 
-    def __setitem__(self, key, value):
-        self._annotate(value)
-        self._params[key] = value
 
-    def __delitem__(self, key):
-        del self._params[key]
+class Children(BrickList):
+    """Behaves exactly like a list, but annotates the variables."""
+    def _set(self, key, value):
+        if value is not None:
+            value.parents.append(self.brick)
 
-    def __len__(self):
-        return len(self._params)
-
-    def insert(self, index, value):
-        self._annotate(value)
-        self._params.insert(index, value)
+    def _del(self, key):
+        child = self._items[key]
+        if child is not None:
+            child.parents.remove(self.brick)
 
 
 class Application(object):
@@ -91,6 +116,8 @@ class Application(object):
     call_stack : :obj:`list` of :class:`Brick`
         The call stack of brick application methods. Used to check whether
         the current call was made by a parent brick.
+    brick : type
+        The brick class to which this instance belongs.
 
     Raises
     ------
@@ -115,11 +142,17 @@ class Application(object):
     """
     call_stack = []
 
-    def __init__(self, application):
-        self.application = application
+    def __init__(self, application_function):
+        self._application_function = application_function
+        self.application_name = application_function.__name__
         self.delegate_function = None
         self.properties = {}
-        self.bound_applications = {}
+
+    @property
+    def application_function(self):
+        if hasattr(self, '_application_function'):
+            return self._application_function
+        return getattr(self.brick, '_' + self.application_name)
 
     def property(self, name):
         """Decorator to make application properties.
@@ -148,7 +181,7 @@ class Application(object):
             raise ValueError
 
         def wrap_property(application_property):
-            self.properties[name] = application_property
+            self.properties[name] = application_property.__name__
             return application_property
         return wrap_property
 
@@ -188,23 +221,24 @@ class Application(object):
         ['foo', 'bar']
 
         """
-        self.delegate_function = f
+        self.delegate_function = f.__name__
         return f
 
     def __get__(self, instance, owner):
         """Instantiate :class:`BoundApplication` for each :class:`Brick`."""
         if instance is None:
             return self
-        elif instance not in self.bound_applications:
-            bound_application = BoundApplication(self, instance)
-            self.bound_applications[instance] = bound_application
-        return self.bound_applications[instance]
+        if not hasattr(instance, "_bound_applications"):
+            instance._bound_applications = {}
+        key = "{}.{}".format(self.brick.__name__, self.application_name)
+        return instance._bound_applications.setdefault(
+            key, BoundApplication(self, instance))
 
     def __getattr__(self, name):
         # Mimic behavior of properties
         if 'properties' in self.__dict__ and name in self.properties:
-            return property(create_unbound_method(self.properties[name],
-                                                  self.brick))
+            return property(create_unbound_method(
+                getattr(self, self.properties[name]), self.brick))
         raise AttributeError
 
     def __setattr__(self, name, value):
@@ -220,14 +254,14 @@ class Application(object):
     @inputs.setter
     def inputs(self, inputs):
         args_names, varargs_name, _, _ = inspect.getargspec(
-            self.application)
+            self.application_function)
         if not all(input_ in args_names + [varargs_name] for input_ in inputs):
             raise ValueError("Unexpected inputs")
         self._inputs = inputs
 
     @property_
     def name(self):
-        return self.application.__name__
+        return self.application_name
 
     def __call__(self, brick, *args, **kwargs):
         if not isinstance(brick, Brick) and six.PY2:
@@ -236,16 +270,16 @@ class Application(object):
         return self.apply(bound_application, *args, **kwargs)
 
     def apply(self, bound_application, *args, **kwargs):
-        return_dict = kwargs.pop('return_dict', False)
-        return_list = kwargs.pop('return_list', False)
-        if return_list and return_dict:
+        as_dict = kwargs.pop('as_dict', False)
+        as_list = kwargs.pop('as_list', False)
+        if as_list and as_dict:
             raise ValueError
 
         brick = bound_application.brick
 
         # Find the names of the inputs to the application method
         args_names, varargs_name, _, _ = inspect.getargspec(
-            self.application)
+            self.application_function)
         args_names = args_names[1:]
 
         # Construct the ApplicationCall, used to store data in for this call
@@ -289,10 +323,12 @@ class Application(object):
         # Run the application method on the annotated variables
         if self.call_stack and brick is not self.call_stack[-1] and \
                 brick not in self.call_stack[-1].children:
-            raise ValueError
+            raise ValueError('Brick ' + str(self.call_stack[-1]) + ' tries '
+                             'to call brick ' + str(self.brick) + ' which '
+                             'is not in the list of its children.')
         self.call_stack.append(brick)
         try:
-            outputs = self.application(brick, *args, **kwargs)
+            outputs = self.application_function(brick, *args, **kwargs)
             outputs = pack(outputs)
         finally:
             self.call_stack.pop()
@@ -311,9 +347,9 @@ class Application(object):
                                           OUTPUT, name)
 
         # Return values
-        if return_list:
+        if as_list:
             return outputs
-        if return_dict:
+        if as_dict:
             return OrderedDict(zip(bound_application.outputs, outputs))
         return unpack(outputs)
 
@@ -331,14 +367,18 @@ class BoundApplication(object):
         # These always belong to the parent (the unbound application)
         if name in ('delegate_function', 'properties'):
             return getattr(self.application, name)
+        if name in self.properties.values():
+            return getattr(self.application.brick, name)
         if name in self.properties:
-            return self.properties[name](self.brick)
+            return getattr(self, self.properties[name])(self.brick)
         # First try the parent (i.e. class level), before trying the delegate
         try:
             return getattr(self.application, name)
         except AttributeError:
             if self.delegate_function:
-                return getattr(self.delegate_function(self.brick), name)
+                return getattr(getattr(self.brick,
+                                       self.delegate_function)(),
+                               name)
             raise
 
     @property
@@ -349,9 +389,25 @@ class BoundApplication(object):
         return self.application.apply(self, *args, **kwargs)
 
 
+def rename_function(function, new_name):
+    old_name = function.__name__
+    function.__name__ = new_name
+    if six.PY3:
+        function.__qualname__ = \
+            function.__qualname__[:-len(old_name)] + new_name
+    return function
+
+
 class _Brick(ABCMeta):
     """Metaclass which attaches brick instances to the applications."""
     def __new__(mcs, name, bases, namespace):
+        for attr in list(namespace.values()):
+            if (isinstance(attr, Application) and
+                    hasattr(attr, '_application_function')):
+                namespace['_' + attr.application_name] = \
+                    rename_function(attr._application_function,
+                                    '_' + attr.application_name)
+                del attr._application_function
         brick = super(_Brick, mcs).__new__(mcs, name, bases, namespace)
         for attr in namespace.values():
             if isinstance(attr, Application):
@@ -526,6 +582,7 @@ class Brick(Annotation):
         self.name = name
 
         self.children = []
+        self.parents = []
 
         self.allocated = False
         self.allocation_config_pushed = False
@@ -543,6 +600,14 @@ class Brick(Annotation):
     @params.setter
     def params(self, value):
         self._params = Parameters(self, value)
+
+    @property
+    def children(self):
+        return self._children
+
+    @children.setter
+    def children(self, value):
+        self._children = Children(self, value)
 
     def allocate(self):
         """Allocate shared variables for parameters.
@@ -716,20 +781,20 @@ class Brick(Annotation):
                          .format(name))
 
     def get_dims(self, names):
-        """Get dictionary of dimensions for a set of input/output variables.
+        """Get list of dimensions for a set of input/output variables.
 
         Parameters
         ----------
-        names : list of str
-            The dictionary of variable names.
+        names : list
+            The variable names.
 
         Returns
         -------
-        dims : dict
-            Dictionary of (variable name, variable dimension) pairs.
+        dims : list
+            The dimensions of the sources.
 
         """
-        return {name: self.get_dim(name) for name in names}
+        return [self.get_dim(name) for name in names]
 
 
 def lazy(func):
@@ -780,8 +845,8 @@ def lazy(func):
 
         # Check if positional arguments were passed as keyword arguments
         args = list(args)
-        for i, arg_name in enumerate(arg_names[:len(arg_names)
-                                               - len(defaults)]):
+        for i, arg_name in enumerate(arg_names[:len(arg_names) -
+                                               len(defaults)]):
             if arg_name in kwargs:
                 if args[i] is not None:
                     raise ValueError
@@ -837,6 +902,7 @@ class ApplicationCall(Annotation):
                 self.brick.name, self.application.name, name)
             variable.tag.name = name
             name = None
+        add_annotation(variable, self.brick)
         return super(ApplicationCall, self).add_auxiliary_variable(
             variable, roles, name)
 
@@ -856,6 +922,11 @@ def application(*args, **kwargs):
     This decorator replaces application methods with :class:`Application`
     instances. It also sets the attributes given as keyword arguments to
     the decorator.
+
+    Note that this decorator purposely does not wrap the original method
+    using e.g. :func:`~functools.wraps` or
+    :func:`~functools.update_wrapper`, since that would make the class
+    impossible to pickle (see notes at :class:`Application`).
 
     Examples
     --------
@@ -880,12 +951,10 @@ def application(*args, **kwargs):
     if args:
         application_function, = args
         application = Application(application_function)
-        update_wrapper(application, application_function)
         return application
     else:
         def wrap_application(application_function):
             application = Application(application_function)
-            update_wrapper(application, application_function)
             for key, value in kwargs.items():
                 setattr(application, key, value)
             return application

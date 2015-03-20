@@ -7,6 +7,22 @@ Want to get try it out? Start by :doc:`installing <setup>` Blocks and having a
 look at the :ref:`quickstart <quickstart>` further down this page. Once you're
 hooked, try your hand at the :ref:`tutorials <tutorials>`.
 
+Blocks is developed in parallel with Fuel_, a dataset processing framework.
+
+.. warning::
+   Blocks is a new project which is still under development. As such, certain
+   (all) parts of the framework are subject to change.
+
+.. tip::
+
+   That said, if you are interested in using Blocks and run into any problems,
+   feel free to ask your question on the `mailing list`_. Also, don't hesitate
+   to file bug reports and feature requests by `making a GitHub issue`_.
+
+.. _mailing list: https://groups.google.com/forum/#!forum/blocks-users
+.. _making a GitHub issue: https://github.com/bartvm/blocks/issues/new
+.. _Fuel: https://github.com/bartvm/fuel
+
 .. _tutorials:
 
 Tutorials
@@ -25,21 +41,12 @@ In-depth
 .. toctree::
    :maxdepth: 1
 
+   rnn
    configuration
-   datasets
    serialization
    api/index.rst
    development/index.rst
 
-.. warning::
-   Blocks is a new project which is still under development. As such, certain
-   (all) parts of the framework are subject to change.
-
-   That said, if you are interested in using Blocks and run into any problems,
-   don't hesitate to file bug reports, feature requests, or simply ask for help,
-   by `making a GitHub issue`_.
-
-.. _making a GitHub issue: https://github.com/bartvm/blocks/issues/new
 
 .. _quickstart:
 
@@ -50,13 +57,14 @@ Quickstart
    :hide:
 
    >>> from theano import tensor
-   >>> from blocks.algorithms import GradientDescent, SteepestDescent
+   >>> from blocks.algorithms import GradientDescent, Scale
    >>> from blocks.bricks import MLP, Tanh, Softmax
    >>> from blocks.bricks.cost import CategoricalCrossEntropy, MisclassificationRate
+   >>> from blocks.graph import ComputationGraph
    >>> from blocks.initialization import IsotropicGaussian, Constant
-   >>> from blocks.datasets.streams import DataStream
-   >>> from blocks.datasets.mnist import MNIST
-   >>> from blocks.datasets.schemes import SequentialScheme
+   >>> from fuel.streams import DataStream
+   >>> from fuel.datasets import MNIST
+   >>> from fuel.schemes import SequentialScheme
    >>> from blocks.extensions import FinishAfter, Printing
    >>> from blocks.extensions.monitoring import DataStreamMonitoring
    >>> from blocks.main_loop import MainLoop
@@ -75,7 +83,7 @@ Calculate your loss function.
 >>> cost = CategoricalCrossEntropy().apply(y.flatten(), y_hat)
 >>> error_rate = MisclassificationRate().apply(y.flatten(), y_hat)
 
-Load your training data.
+Load your training data using Fuel.
 
 >>> mnist_train = MNIST("train")
 >>> train_stream = DataStream(
@@ -84,21 +92,25 @@ Load your training data.
 >>> mnist_test = MNIST("test")
 >>> test_stream = DataStream(
 ...     dataset=mnist_test,
-...     iteration_scheme=SequentialScheme(mnist_train.num_examples, 1024))
+...     iteration_scheme=SequentialScheme(mnist_test.num_examples, 1024))
 
 And train!
 
+>>> from blocks.model import Model
 >>> main_loop = MainLoop(
-...     model=mlp, data_stream=train_stream,
+...     model=Model(cost), data_stream=train_stream,
 ...     algorithm=GradientDescent(
-...         cost=cost, step_rule=SteepestDescent(learning_rate=0.1)),
+...         cost=cost, params=ComputationGraph(cost).parameters,
+...         step_rule=Scale(learning_rate=0.1)),
 ...     extensions=[FinishAfter(after_n_epochs=5),
 ...                 DataStreamMonitoring(
 ...                     variables=[cost, error_rate],
 ...                     data_stream=test_stream,
 ...                     prefix="test"),
 ...                 Printing()])
->>> main_loop.run() # doctest: +SKIP
+>>> main_loop.run() # doctest: +ELLIPSIS
+<BLANKLINE>
+...
 
 Features
 --------
@@ -107,7 +119,6 @@ Currently Blocks supports and provides:
 
 * Constructing parametrized Theano operations, called "bricks"
 * Pattern matching to select variables and bricks in large models
-* A pipeline for loading and iterating over training data
 * Algorithms to optimize your model
 * Saving and resuming of training
 * Monitoring and analyzing values during training progress (on the training set

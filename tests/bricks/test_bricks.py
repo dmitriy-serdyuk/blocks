@@ -4,9 +4,11 @@ import theano
 from numpy.testing import assert_allclose, assert_raises
 from theano import tensor
 
-from blocks.bricks import Identity, Linear, Maxout, LinearMaxout, MLP, Tanh
+from blocks.bricks import (Identity, Linear, Maxout, LinearMaxout, MLP, Tanh,
+                           Sequence, Random)
 from blocks.bricks.base import Application, application, Brick, lazy
-from blocks.filter import get_application_call
+from blocks.bricks.parallel import Parallel, Fork
+from blocks.filter import get_application_call, get_brick
 from blocks.initialization import Constant
 from blocks.utils import shared_floatx
 
@@ -278,6 +280,13 @@ def test_rng():
     assert linear.seed != linear2.seed
 
 
+def test_random_brick():
+    random = Random()
+    # This makes sure that a Random brick doesn't instantiate more than one
+    # Theano RNG during its lifetime (see PR #485 on Github)
+    assert random.theano_rng is random.theano_rng
+
+
 def test_linear():
     x = tensor.matrix()
 
@@ -351,10 +360,116 @@ def test_mlp():
     mlp.initialize()
     assert_allclose(x_val.dot(numpy.ones((16, 8))),
                     y.eval({x: x_val}), rtol=1e-06)
+    assert mlp.rng == mlp.linear_transformations[0].rng
+
+
+def test_mlp_apply():
+    x = tensor.matrix()
+    x_val = numpy.random.rand(2, 16).astype(theano.config.floatX)
+    mlp = MLP(activations=[Tanh().apply, None], dims=[16, 8, 4],
+              weights_init=Constant(1), biases_init=Constant(1))
+    y = mlp.apply(x)
+    mlp.initialize()
+    assert_allclose(
+        numpy.tanh(x_val.dot(numpy.ones((16, 8))) + numpy.ones((2, 8))).dot(
+            numpy.ones((8, 4))) + numpy.ones((2, 4)),
+        y.eval({x: x_val}), rtol=1e-06)
+
+    mlp = MLP(activations=[None], weights_init=Constant(1), use_bias=False)
+    mlp.dims = [16, 8]
+    y = mlp.apply(x)
+    mlp.initialize()
+    assert_allclose(x_val.dot(numpy.ones((16, 8))),
+                    y.eval({x: x_val}), rtol=1e-06)
+    assert mlp.rng == mlp.linear_transformations[0].rng
+
+
+def test_sequence():
+    x = tensor.matrix()
+
+    linear_1 = Linear(input_dim=16, output_dim=8, weights_init=Constant(2),
+                      biases_init=Constant(1))
+
+    linear_2 = Linear(input_dim=8, output_dim=4, weights_init=Constant(3),
+                      biases_init=Constant(4))
+    sequence = Sequence([linear_1.apply, linear_2.apply])
+    sequence.initialize()
+    y = sequence.apply(x)
+    x_val = numpy.ones((4, 16), dtype=theano.config.floatX)
+    assert_allclose(
+        y.eval({x: x_val}),
+        (x_val.dot(2 * numpy.ones((16, 8))) + numpy.ones((4, 8))).dot(
+            3 * numpy.ones((8, 4))) + 4 * numpy.ones((4, 4)))
+
+
+def test_sequence_variable_outputs():
+    x = tensor.matrix()
+
+    linear_1 = Linear(input_dim=16, output_dim=8, weights_init=Constant(2),
+                      biases_init=Constant(1))
+
+    fork = Fork(input_dim=8, output_names=['linear_2_1', 'linear_2_2'],
+                output_dims=[4, 5], prototype=Linear(),
+                weights_init=Constant(3), biases_init=Constant(4))
+    sequence = Sequence([linear_1.apply, fork.apply])
+    sequence.initialize()
+    y_1, y_2 = sequence.apply(x)
+    x_val = numpy.ones((4, 16), dtype=theano.config.floatX)
+    assert_allclose(
+        y_1.eval({x: x_val}),
+        (x_val.dot(2 * numpy.ones((16, 8))) + numpy.ones((4, 8))).dot(
+            3 * numpy.ones((8, 4))) + 4 * numpy.ones((4, 4)))
+    assert_allclose(
+        y_2.eval({x: x_val}),
+        (x_val.dot(2 * numpy.ones((16, 8))) + numpy.ones((4, 8))).dot(
+            3 * numpy.ones((8, 5))) + 4 * numpy.ones((4, 5)))
+
+
+def test_sequence_variable_inputs():
+    x, y = tensor.matrix(), tensor.matrix()
+
+    parallel_1 = Parallel(input_names=['input_1', 'input_2'],
+                          input_dims=[4, 5], output_dims=[3, 2],
+                          prototype=Linear(), weights_init=Constant(2),
+                          biases_init=Constant(1))
+    parallel_2 = Parallel(input_names=['input_1', 'input_2'],
+                          input_dims=[3, 2], output_dims=[5, 4],
+                          prototype=Linear(), weights_init=Constant(2),
+                          biases_init=Constant(1))
+    sequence = Sequence([parallel_1.apply, parallel_2.apply])
+    sequence.initialize()
+    new_x, new_y = sequence.apply(x, y)
+    x_val = numpy.ones((4, 4), dtype=theano.config.floatX)
+    y_val = numpy.ones((4, 5), dtype=theano.config.floatX)
+    assert_allclose(
+        new_x.eval({x: x_val}),
+        (x_val.dot(2 * numpy.ones((4, 3))) + numpy.ones((4, 3))).dot(
+            2 * numpy.ones((3, 5))) + numpy.ones((4, 5)))
+    assert_allclose(
+        new_y.eval({y: y_val}),
+        (y_val.dot(2 * numpy.ones((5, 2))) + numpy.ones((4, 2))).dot(
+            2 * numpy.ones((2, 4))) + numpy.ones((4, 4)))
 
 
 def test_application_call():
     X = tensor.matrix('X')
     brick = TestBrick()
     Y = brick.access_application_call(X)
+    (auxiliary_variable,) = get_application_call(Y).auxiliary_variables
+    assert auxiliary_variable.name == 'test_val'
+    assert get_brick(auxiliary_variable) == brick
     assert get_application_call(Y).auxiliary_variables[0].name == 'test_val'
+
+
+def test_linear_nan_allocation():
+    x = tensor.matrix()
+
+    linear = Linear(input_dim=16, output_dim=8, weights_init=Constant(2),
+                    biases_init=Constant(1))
+    linear.apply(x)
+    w1 = numpy.nan * numpy.zeros((16, 8))
+    w2 = linear.params[0].get_value()
+    b1 = numpy.nan * numpy.zeros(8)
+    b2 = linear.params[1].get_value()
+    numpy.testing.assert_equal(w1, w2)
+    numpy.testing.assert_equal(b1, b2)

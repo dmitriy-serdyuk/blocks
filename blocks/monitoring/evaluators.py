@@ -1,7 +1,9 @@
 from collections import OrderedDict
 import logging
 
+from picklable_itertools.extras import equizip
 import theano
+from theano import tensor
 
 from blocks.utils import dict_subset
 from blocks.monitoring.aggregation import _DataIndependent, Mean, TakeLast
@@ -49,7 +51,7 @@ class AggregationBuffer(object):
         self.use_take_last = use_take_last
 
         self.variable_names = [v.name for v in self.variables]
-        if len(self.variable_names) < len(self.variables):
+        if len(set(self.variable_names)) < len(self.variables):
             raise ValueError("variables should have different names")
         self._computation_graph = ComputationGraph(self.variables)
         self.inputs = self._computation_graph.inputs
@@ -111,8 +113,13 @@ class AggregationBuffer(object):
         else:
             self._initialize_fun = None
 
+        # We need to call `as_tensor_variable` here
+        # to avoid returning `CudaNdarray`s to the user, which
+        # happens otherwise under some circumstances (see
+        # https://groups.google.com/forum/#!topic/theano-users/H3vkDN-Shok)
         self._readout_fun = theano.function(
-            [], list(self.readout_variables.values()))
+            [], [tensor.as_tensor_variable(v)
+                 for v in self.readout_variables.values()])
         logger.debug("Initialization and readout functions compiled")
 
     def initialize_aggregators(self):
@@ -127,7 +134,7 @@ class AggregationBuffer(object):
             raise Exception("To readout you must first initialize, then"
                             "process batches!")
         ret_vals = self._readout_fun()
-        return dict(zip(self.variable_names, ret_vals))
+        return dict(equizip(self.variable_names, ret_vals))
 
 
 class DatasetEvaluator(object):
@@ -155,10 +162,19 @@ class DatasetEvaluator(object):
         Each variable can be tagged with an :class:`AggregationScheme` that
         specifies how the value can be computed for a data set by
         aggregating minibatches.
+    updates : list of tuples or :class:`~collections.OrderedDict` or None
+        :class:`~tensor.TensorSharedVariable` updates to be performed
+        during evaluation. Be careful not to update any model parameters
+        as this is not intended to alter your model in any meaningfull
+        way. A typical use case of this option arises when the theano
+        function used for evaluation contains a call to
+        :function:`~theano.scan` which might have returned shared
+        variable updates.
 
     """
-    def __init__(self, variables):
+    def __init__(self, variables, updates=None):
         self.buffer_ = AggregationBuffer(variables)
+        self.updates = updates
         self._compile()
 
     def _compile(self):
@@ -172,9 +188,13 @@ class DatasetEvaluator(object):
 
         """
         if self.buffer_.accumulation_updates:
+            updates = OrderedDict()
+            updates.update(self.buffer_.accumulation_updates)
+            if self.updates:
+                updates.update(self.updates)
             self._accumulate_fun = theano.function(
                 self.buffer_.inputs, [],
-                updates=self.buffer_.accumulation_updates)
+                updates=updates)
         else:
             self._accumulate_fun = None
 

@@ -2,6 +2,7 @@ from inspect import isclass
 import re
 
 from blocks.bricks.base import ApplicationCall, Brick
+from blocks.roles import has_roles
 
 
 def get_annotation(var, cls):
@@ -72,7 +73,7 @@ class VariableFilter(object):
 
     Examples
     --------
-    >>> from blocks.bricks import MLP, Linear, Sigmoid, Identity, BIASES
+    >>> from blocks.bricks import MLP, Linear, Sigmoid, Identity, BIAS
     >>> mlp = MLP(activations=[Identity(), Sigmoid()], dims=[20, 10, 20])
     >>> from theano import tensor
     >>> x = tensor.matrix()
@@ -80,7 +81,7 @@ class VariableFilter(object):
     >>> from blocks.graph import ComputationGraph
     >>> cg = ComputationGraph(y_hat)
     >>> from blocks.filter import VariableFilter
-    >>> var_filter = VariableFilter(roles=[BIASES],
+    >>> var_filter = VariableFilter(roles=[BIAS],
     ...                             bricks=[mlp.linear_transformations[0]])
     >>> var_filter(cg.variables)
     [b]
@@ -104,17 +105,8 @@ class VariableFilter(object):
         """
         if self.roles:
             filtered_variables = []
-            for var in variables:
-                var_roles = getattr(var.tag, 'roles', [])
-                if self.each_role:
-                    if all(any(isinstance(var_role, role.__class__) for
-                               var_role in var_roles) for role in self.roles):
-                        filtered_variables.append(var)
-                else:
-                    if any(any(isinstance(var_role, role.__class__) for
-                               var_role in var_roles) for role in self.roles):
-                        filtered_variables.append(var)
-            variables = filtered_variables
+            variables = [var for var in variables
+                         if has_roles(var, self.roles, self.each_role)]
         if self.bricks is not None:
             filtered_variables = []
             for var in variables:
@@ -131,11 +123,11 @@ class VariableFilter(object):
             variables = filtered_variables
         if self.name:
             variables = [var for var in variables
-                         if hasattr(var.tag, 'name')
-                         and re.match(self.name, var.tag.name)]
+                         if hasattr(var.tag, 'name') and
+                         re.match(self.name, var.tag.name)]
         if self.application:
             variables = [var for var in variables
-                         if get_application_call(var)
-                         and get_application_call(var).application
-                         == self.application]
+                         if get_application_call(var) and
+                         get_application_call(var).application ==
+                         self.application]
         return variables

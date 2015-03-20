@@ -7,7 +7,7 @@ import logging
 import pprint
 import sys
 
-import dill
+from six.moves import cPickle
 import numpy
 import theano
 from theano import tensor
@@ -15,15 +15,16 @@ from theano import tensor
 from blocks.bricks import Tanh
 from blocks.bricks.recurrent import GatedRecurrent
 from blocks.bricks.sequence_generators import (
-    SequenceGenerator, LinearReadout, SoftmaxEmitter, LookupFeedback)
+    SequenceGenerator, Readout, SoftmaxEmitter, LookupFeedback)
 from blocks.graph import ComputationGraph
-from blocks.datasets.streams import DataStream
-from blocks.datasets.schemes import ConstantScheme
-from blocks.algorithms import GradientDescent, SteepestDescent
+from fuel.streams import DataStream
+from fuel.schemes import ConstantScheme
+from blocks.algorithms import GradientDescent, Scale
 from blocks.initialization import Orthogonal, IsotropicGaussian, Constant
+from blocks.model import Model
 from blocks.monitoring import aggregation
 from blocks.extensions import FinishAfter, Printing
-from blocks.extensions.saveload import SerializeMainLoop
+from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.main_loop import MainLoop
 from blocks.select import Selector
@@ -46,14 +47,14 @@ def main(mode, save_path, steps, num_batches):
         feedback_dim = 8
 
         # Build the bricks and initialize them
-        transition = GatedRecurrent(name="transition", activation=Tanh(),
-                                    dim=dim)
+        transition = GatedRecurrent(name="transition", dim=dim,
+                                    activation=Tanh())
         generator = SequenceGenerator(
-            LinearReadout(readout_dim=num_states, source_names=["states"],
-                          emitter=SoftmaxEmitter(name="emitter"),
-                          feedbacker=LookupFeedback(
-                              num_states, feedback_dim, name='feedback'),
-                          name="readout"),
+            Readout(readout_dim=num_states, source_names=["states"],
+                    emitter=SoftmaxEmitter(name="emitter"),
+                    feedback_brick=LookupFeedback(
+                        num_states, feedback_dim, name='feedback'),
+                    name="readout"),
             transition,
             weights_init=IsotropicGaussian(0.01), biases_init=Constant(0),
             name="generator")
@@ -74,29 +75,29 @@ def main(mode, save_path, steps, num_batches):
 
         # Build the cost computation graph.
         x = tensor.lmatrix('data')
-        cost = aggregation.mean(generator.cost(x[:, :]).sum(),
+        cost = aggregation.mean(generator.cost_matrix(x[:, :]).sum(),
                                 x.shape[1])
         cost.name = "sequence_log_likelihood"
 
         algorithm = GradientDescent(
             cost=cost, params=list(Selector(generator).get_params().values()),
-            step_rule=SteepestDescent(0.001))
+            step_rule=Scale(0.001))
         main_loop = MainLoop(
-            model=generator,
+            algorithm=algorithm,
             data_stream=DataStream(
                 MarkovChainDataset(rng, seq_len),
                 iteration_scheme=ConstantScheme(batch_size)),
-            algorithm=algorithm,
+            model=Model(cost),
             extensions=[FinishAfter(after_n_batches=num_batches),
                         TrainingDataMonitoring([cost], prefix="this_step",
-                                               after_every_batch=True),
+                                               after_batch=True),
                         TrainingDataMonitoring([cost], prefix="average",
                                                every_n_batches=100),
-                        SerializeMainLoop(save_path, every_n_batches=500),
+                        Checkpoint(save_path, every_n_batches=500),
                         Printing(every_n_batches=100)])
         main_loop.run()
     elif mode == "sample":
-        main_loop = dill.load(open(save_path, "rb"))
+        main_loop = cPickle.load(open(save_path, "rb"))
         generator = main_loop.model
 
         sample = ComputationGraph(generator.generate(

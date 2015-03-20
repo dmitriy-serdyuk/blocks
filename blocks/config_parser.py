@@ -12,12 +12,6 @@ variable. A configuration file is of the form:
 
    data_path: /home/user/datasets
 
-Which could be overwritten by using environment variables:
-
-.. code-block:: bash
-
-   $ BLOCKS_DATA_PATH=/home/users/other_datasets python
-
 If a setting is not configured and does not provide a default, a
 :class:`~.ConfigurationError` is raised when it is
 accessed.
@@ -26,15 +20,10 @@ Configuration values can be accessed as attributes of
 :const:`blocks.config`.
 
     >>> from blocks import config
-    >>> print(config.data_path) # doctest: +SKIP
-    '~/datasets'
+    >>> print(config.default_seed) # doctest: +SKIP
+    1
 
 The following configurations are supported:
-
-.. option:: data_path
-
-   The path where dataset files are stored. Can also be set using the
-   environment variable ``BLOCKS_DATA_PATH``.
 
 .. option:: default_seed
 
@@ -42,6 +31,20 @@ The following configurations are supported:
    NumPy :class:`~numpy.random.RandomState` objects as well as Theano's
    :class:`~theano.sandbox.rng_mrg.MRG_RandomStreams` objects. Must be an
    integer. By default this is set to 1.
+
+.. option:: recursion_limit
+
+   The recursion max depth limit used in
+   :class:`~blocks.main_loop.MainLoop` as well as in other situations when
+   deep recursion is required. The most notable example of such a situation
+   is pickling or unpickling a complex structure with lots of objects, such
+   as a big Theano computation graph.
+
+.. option:: bokeh_server
+
+   The default URL to use when contacting a Bokeh server for live plotting.
+   This setting is used by the :class:`~blocks.extensions.plot.Plot`. The
+   default is ``http://localhost:5006/``.
 
 .. _YAML: http://yaml.org/
 .. _environment variables:
@@ -137,7 +140,8 @@ class Configuration(object):
 config = Configuration()
 
 # Define configuration options
-config.add_config('data_path', type_=str, env_var='BLOCKS_DATA_PATH')
 config.add_config('default_seed', type_=int, default=1)
+config.add_config('recursion_limit', type_=int, default=10000)
+config.add_config('bokeh_server', type_=str, default='http://localhost:5006/')
 
 config.load_yaml()

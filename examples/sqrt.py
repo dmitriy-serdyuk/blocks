@@ -13,13 +13,15 @@ from argparse import ArgumentParser
 import theano
 from theano import tensor
 
-from blocks.algorithms import GradientDescent, SteepestDescent
+from blocks.algorithms import GradientDescent, Scale
 from blocks.bricks import MLP, Tanh, Identity
 from blocks.bricks.cost import SquaredError
+from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Constant
-from blocks.datasets import ContainerDataset
-from blocks.datasets.streams import BatchDataStream, DataStreamMapping
-from blocks.datasets.schemes import ConstantScheme
+from blocks.model import Model
+from fuel.datasets import IterableDataset
+from fuel.transformers import Batch, Mapping
+from fuel.schemes import ConstantScheme
 from blocks.extensions import FinishAfter, Timing, Printing
 from blocks.extensions.saveload import LoadFromDump, Dump
 from blocks.extensions.monitoring import (TrainingDataMonitoring,
@@ -29,15 +31,20 @@ from blocks.main_loop import MainLoop
 floatX = theano.config.floatX
 
 
+def _data_sqrt(data):
+    return (math.sqrt(data[0]),)
+
+
+def _array_tuple(data):
+    return tuple((numpy.asarray(d, dtype=floatX) for d in data))
+
+
 def get_data_stream(iterable):
-    dataset = ContainerDataset({'numbers': iterable})
-    data_stream = DataStreamMapping(dataset.get_default_stream(),
-                                    lambda data: (math.sqrt(data[0]),),
-                                    add_sources=('roots',))
-    data_stream = DataStreamMapping(
-        data_stream,
-        lambda data: tuple((numpy.asarray(d, dtype=floatX) for d in data)))
-    return BatchDataStream(data_stream, ConstantScheme(20))
+    dataset = IterableDataset({'numbers': iterable})
+    data_stream = Mapping(dataset.get_example_stream(),
+                          _data_sqrt, add_sources=('roots',))
+    data_stream = Mapping(data_stream, _array_tuple)
+    return Batch(data_stream, ConstantScheme(20))
 
 
 def main(save_to, num_batches, continue_=False):
@@ -51,17 +58,18 @@ def main(save_to, num_batches, continue_=False):
     cost.name = "cost"
 
     main_loop = MainLoop(
-        mlp,
-        get_data_stream(range(100)),
         GradientDescent(
-            cost=cost, step_rule=SteepestDescent(learning_rate=0.001)),
+            cost=cost, params=ComputationGraph(cost).parameters,
+            step_rule=Scale(learning_rate=0.001)),
+        get_data_stream(range(100)),
+        model=Model(cost),
         extensions=([LoadFromDump(save_to)] if continue_ else []) +
         [Timing(),
             FinishAfter(after_n_batches=num_batches),
             DataStreamMonitoring(
                 [cost], get_data_stream(range(100, 200)),
                 prefix="test"),
-            TrainingDataMonitoring([cost], after_every_epoch=True),
+            TrainingDataMonitoring([cost], after_epoch=True),
             Dump(save_to),
             Printing()])
     main_loop.run()

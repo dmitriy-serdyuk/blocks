@@ -31,6 +31,7 @@ def test_computation_graph():
     x = tensor.matrix('x')
     y = tensor.matrix('y')
     z = x + y
+    z.name = 'z'
     a = z.copy()
     a.name = 'a'
     b = z.copy()
@@ -59,6 +60,25 @@ def test_computation_graph():
     cg5 = ComputationGraph([w1])
     assert W in cg5.variables
     assert w1 in cg5.variables
+
+    # Test scan
+    s, _ = theano.scan(lambda inp, accum: accum + inp,
+                       sequences=x,
+                       outputs_info=tensor.zeros_like(x[0]))
+    scan = s.owner.inputs[0].owner.op
+    cg6 = ComputationGraph(s)
+    assert cg6.scans == [scan]
+    assert all(v in cg6.scan_variables for v in scan.inputs + scan.outputs)
+
+
+def test_replace():
+    # Test if replace works with outputs
+    x = tensor.scalar()
+    y = x + 1
+    cg = ComputationGraph([y])
+    doubled_cg = cg.replace([(y, 2 * y)])
+    out_val = doubled_cg.outputs[0].eval({x: 2})
+    assert out_val == 6.0
 
 
 def test_apply_noise():
