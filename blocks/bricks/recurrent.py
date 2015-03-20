@@ -10,7 +10,6 @@ from theano import tensor, Variable
 
 from blocks.bricks import Initializable, Sigmoid, Tanh
 from blocks.bricks.base import Application, application, Brick, lazy
-from blocks import config
 from blocks.initialization import NdarrayInitialization
 from blocks.roles import add_role, WEIGHT, BIAS
 from blocks.select import Selector
@@ -110,6 +109,7 @@ def recurrent(*args, **kwargs):
             """
             # Extract arguments related to iteration and immediately relay the
             # call to the wrapped function if `iterate=False`
+            scan_strict = kwargs.pop('scan_strict', False)
             iterate = kwargs.pop('iterate', True)
             if not iterate:
                 return application_function(brick, *args, **kwargs)
@@ -183,7 +183,7 @@ def recurrent(*args, **kwargs):
             for name, state in states_given.items():
                 states_given[name] = tensor.unbroadcast(state,
                                                         *range(state.ndim))
-            if config.scan_strict:
+            if scan_strict:
                 # Find all shared variables
                 shared_vars = list(Selector(brick).get_params().values())
                 # Just make `scan_function` discard them before calling
