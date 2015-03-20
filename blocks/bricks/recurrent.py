@@ -10,6 +10,7 @@ from theano import tensor, Variable
 
 from blocks.bricks import Initializable, Sigmoid, Tanh
 from blocks.bricks.base import Application, application, Brick, lazy
+from blocks import config
 from blocks.initialization import NdarrayInitialization
 from blocks.roles import add_role, WEIGHT, BIAS
 from blocks.select import Selector
