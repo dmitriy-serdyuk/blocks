@@ -8,6 +8,7 @@ import operator
 
 import theano
 from six.moves import input
+from picklable_itertools.extras import equizip
 from theano import tensor
 
 from blocks.bricks import Tanh, Initializable
@@ -35,7 +36,7 @@ from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.plot import Plot
 from blocks.main_loop import MainLoop
 from blocks.filter import VariableFilter
-from blocks.utils import named_copy, dict_union, equizip
+from blocks.utils import named_copy, dict_union
 
 from blocks.search import BeamSearch
 
@@ -125,7 +126,7 @@ class WordReverser(Initializable):
 
     @application
     def cost(self, chars, chars_mask, targets, targets_mask):
-        return self.generator.cost(
+        return self.generator.cost_matrix(
             targets, targets_mask,
             attended=self.encoder.apply(
                 **dict_union(
@@ -235,7 +236,7 @@ def main(mode, save_path, num_batches, data_path=None):
             algorithm=algorithm,
             extensions=[
                 Timing(),
-                TrainingDataMonitoring(observables, after_every_batch=True),
+                TrainingDataMonitoring(observables, after_batch=True),
                 average_monitoring,
                 FinishAfter(after_n_batches=num_batches)
                 # This shows a way to handle NaN emerging during

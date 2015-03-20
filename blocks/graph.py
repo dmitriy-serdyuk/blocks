@@ -3,6 +3,7 @@ import logging
 from collections import OrderedDict
 from itertools import chain
 
+from picklable_itertools.extras import equizip
 import theano
 from theano import Variable
 from theano.gof import graph
@@ -13,7 +14,7 @@ from toolz import unique
 from blocks import config
 from blocks.roles import add_role, has_roles, AUXILIARY, PARAMETER, DROPOUT
 from blocks.utils import (is_graph_input, is_shared_variable, dict_union,
-                          shared_like, equizip)
+                          shared_like)
 
 logger = logging.getLogger(__name__)
 floatX = theano.config.floatX
@@ -203,10 +204,15 @@ class ComputationGraph(object):
         # Sort `replacements` in topological order
         for node in apply_nodes_sorted:
             for input_ in node.inputs:
-                if input_ not in replacements:
-                    continue
-                replacement_keys_cur.append(input_)
-                replacement_vals_cur.append(replacements[input_])
+                if input_ in replacements:
+                    replacement_keys_cur.append(input_)
+                    replacement_vals_cur.append(replacements[input_])
+
+        # Add outputs of the computation graph
+        for output in self.outputs:
+            if output in replacements:
+                replacement_keys_cur.append(output)
+                replacement_vals_cur.append(replacements[output])
 
         # Replace step-by-step in topological order
         while replacement_keys_cur:
@@ -348,7 +354,7 @@ class Annotation(object):
         roles : list of :class:`.VariableRole` instances, optional
             The roles of this variable. The :const:`.AUXILIARY`
             role will automatically be added. Other options are
-            :const:`.COST`, :const:`.WEIGHTS`, etc.
+            :const:`.COST`, :const:`.WEIGHT`, etc.
         name : str, optional
             Name to give to the variable. If the variable already has a
             name it will be overwritten.

@@ -4,17 +4,17 @@ import inspect
 import logging
 from functools import wraps
 
+from picklable_itertools.extras import equizip
 import theano
 from theano import tensor, Variable
 
 from blocks.bricks import Initializable, Sigmoid, Tanh
 from blocks.bricks.base import Application, application, Brick, lazy
-from blocks import config
 from blocks.initialization import NdarrayInitialization
-from blocks.roles import add_role, WEIGHTS, BIASES
+from blocks.roles import add_role, WEIGHT, BIAS
 from blocks.select import Selector
 from blocks.utils import (pack, shared_floatx_nans, dict_union, dict_subset,
-                          is_shared_variable, equizip)
+                          is_shared_variable)
 
 logger = logging.getLogger()
 
@@ -198,8 +198,7 @@ def recurrent(*args, **kwargs):
                              list(contexts_given))
                 kwargs = dict(equizip(arg_names, args[:-len(shared_vars)]))
                 kwargs.update(rest_kwargs)
-                outputs = getattr(brick, application_function.__name__)(
-                    iterate=False, **kwargs)
+                outputs = application(iterate=False, **kwargs)
                 # We want to save the computation graph returned by the
                 # `application_function` when it is called inside the
                 # `theano.scan`.
@@ -376,11 +375,11 @@ class LSTM(BaseRecurrent, Initializable):
         self.W_cell_to_out = shared_floatx_nans((self.dim,),
                                                 name='W_cell_to_out')
         self.biases = shared_floatx_nans((4*self.dim,), name='biases')
-        add_role(self.W_state, WEIGHTS)
-        add_role(self.W_cell_to_in, WEIGHTS)
-        add_role(self.W_cell_to_forget, WEIGHTS)
-        add_role(self.W_cell_to_out, WEIGHTS)
-        add_role(self.biases, BIASES)
+        add_role(self.W_state, WEIGHT)
+        add_role(self.W_cell_to_in, WEIGHT)
+        add_role(self.W_cell_to_forget, WEIGHT)
+        add_role(self.W_cell_to_out, WEIGHT)
+        add_role(self.biases, BIAS)
 
         self.params = [self.W_state, self.W_cell_to_in, self.W_cell_to_forget,
                        self.W_cell_to_out, self.biases]
@@ -451,13 +450,14 @@ class GatedRecurrent(BaseRecurrent, Initializable):
 
     Parameters
     ----------
-    activation : :class:`.Brick`
-        The brick to apply as activation.
-    gated_activation : :class:`.Brick` or None
-        The brick to apply as activation for gates. If ``None`` a
-        :class:`.Sigmoid` brick is used.
     dim : int
         The dimension of the hidden state.
+    activation : :class:`.Brick` or None
+        The brick to apply as activation. If ``None`` a
+        :class:`.Tanh` brick is used.
+    gate_activation : :class:`.Brick` or None
+        The brick to apply as activation for gates. If ``None`` a
+        :class:`.Sigmoid` brick is used.
     use_upgate_gate : bool
         If True the update gates are used.
     use_reset_gate : bool
@@ -474,13 +474,15 @@ class GatedRecurrent(BaseRecurrent, Initializable):
 
     """
     @lazy
-    def __init__(self, activation, gate_activation, dim,
+    def __init__(self, dim, activation=None, gate_activation=None,
                  use_update_gate=True, use_reset_gate=True, **kwargs):
         super(GatedRecurrent, self).__init__(**kwargs)
         self.dim = dim
         self.use_update_gate = use_update_gate
         self.use_reset_gate = use_reset_gate
 
+        if not activation:
+            activation = Tanh()
         if not gate_activation:
             gate_activation = Sigmoid()
         self.activation = activation
