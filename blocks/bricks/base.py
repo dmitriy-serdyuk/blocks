@@ -1,4 +1,5 @@
 import inspect
+import operator
 from abc import ABCMeta
 from collections import OrderedDict
 from types import MethodType
@@ -765,6 +766,16 @@ class Brick(Annotation):
         """
         return [self.get_dim(name) for name in names]
 
+    def get_unique_path(self):
+        """Returns unique path to this brick in the application graph."""
+        if self.parents:
+            parent = min(self.parents, key=operator.attrgetter('name'))
+            return parent.get_unique_path() + [self]
+        else:
+            return [self]
+
+    def get_full_name(self):
+        return '/' + '/'.join([brick.name for brick in self.get_unique_path()])
 
 def lazy(func):
     """Makes the initialization lazy.
