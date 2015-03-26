@@ -1,7 +1,7 @@
 import numpy
 import six
 import theano
-from numpy.testing import assert_allclose, assert_raises
+from numpy.testing import assert_allclose, assert_raises, assert_equal
 from theano import tensor
 
 from blocks.bricks import (Identity, Linear, Maxout, LinearMaxout, MLP, Tanh,
@@ -474,3 +474,9 @@ def test_linear_nan_allocation():
     b2 = linear.params[1].get_value()
     numpy.testing.assert_equal(w1, w2)
     numpy.testing.assert_equal(b1, b2)
+
+
+def test_get_unique_path():
+    identity = Identity()
+    mlp = MLP([identity, Identity()], [10, 20, 2])
+    assert_equal(identity.get_unique_path(), [mlp, identity])

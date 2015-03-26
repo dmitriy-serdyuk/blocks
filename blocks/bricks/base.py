@@ -774,8 +774,6 @@ class Brick(Annotation):
         else:
             return [self]
 
-    def get_full_name(self):
-        return '/' + '/'.join([brick.name for brick in self.get_unique_path()])
 
 def lazy(func):
     """Makes the initialization lazy.
