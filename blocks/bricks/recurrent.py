@@ -184,7 +184,9 @@ def recurrent(*args, **kwargs):
 
             def scan_function(*args):
                 args = list(args)
-                arg_names = (list(sequences_given) + list(states_given) +
+                arg_names = (list(sequences_given) +
+                             [output for output in application.outputs
+                              if output in application.states] +
                              list(contexts_given))
                 kwargs = dict(equizip(arg_names, args))
                 kwargs.update(rest_kwargs)
@@ -195,9 +197,10 @@ def recurrent(*args, **kwargs):
                 application_call.inner_inputs = args
                 application_call.inner_outputs = pack(outputs)
                 return outputs
-            outputs_info = (list(states_given.values()) +
-                            [None] * (len(application.outputs) -
-                                      len(application.states)))
+            outputs_info = [
+                states_given[name] if name in application.states
+                else None
+                for name in application.outputs]
             result, updates = theano.scan(
                 scan_function, sequences=list(sequences_given.values()),
                 outputs_info=outputs_info,

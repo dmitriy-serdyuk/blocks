@@ -71,6 +71,17 @@ def test_computation_graph():
     assert all(v in cg6.scan_variables for v in scan.inputs + scan.outputs)
 
 
+def test_computation_graph_variable_duplicate():
+    # Test if ComputationGraph.variables contains duplicates if some outputs
+    # are part of the computation graph
+    x, y = tensor.matrix('x'), tensor.matrix('y')
+    w = x + y
+    z = tensor.exp(w)
+
+    cg = ComputationGraph([z, w])
+    assert len(set(cg.variables)) == len(cg.variables)
+
+
 def test_replace():
     # Test if replace works with outputs
     x = tensor.scalar()
@@ -79,6 +90,17 @@ def test_replace():
     doubled_cg = cg.replace([(y, 2 * y)])
     out_val = doubled_cg.outputs[0].eval({x: 2})
     assert out_val == 6.0
+
+
+def test_replace_multiple_inputs():
+    # Test if replace works on variables that are input to multiple nodes
+    x = tensor.scalar('x')
+    y = 2 * x
+    z = x + 1
+
+    cg = ComputationGraph([y, z]).replace({x: 0.5 * x})
+    assert_allclose(cg.outputs[0].eval({x: 1.0}), 1.0)
+    assert_allclose(cg.outputs[1].eval({x: 1.0}), 1.5)
 
 
 def test_apply_noise():

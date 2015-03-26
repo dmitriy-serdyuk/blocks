@@ -1,6 +1,6 @@
 import inspect
 from abc import ABCMeta
-from collections import OrderedDict, MutableSequence
+from collections import OrderedDict
 from types import MethodType
 
 import six
@@ -11,6 +11,7 @@ from theano.gof import Variable
 from blocks.graph import add_annotation, Annotation
 from blocks.roles import add_role, PARAMETER, INPUT, OUTPUT
 from blocks.utils import pack, repr_attrs, reraise_as, unpack
+from blocks.utils.containers import AnnotatingList
 
 
 def create_unbound_method(func, cls):
@@ -30,61 +31,29 @@ def create_unbound_method(func, cls):
 property_ = property
 
 
-@add_metaclass(ABCMeta)
-class BrickList(MutableSequence):
-    """Like a list, but performs operations on insert/delete."""
-    def __init__(self, brick, items):
-        self.brick = brick
-        self._items = []
-        for item in items:
-            self.append(item)
-
-    def __repr__(self):
-        return repr(self._items)
-
-    def __eq__(self, other):
-        return self._items == other
-
-    def __getitem__(self, key):
-        return self._items[key]
-
-    def _set(self, key, value):
-        pass
-
-    def _del(self, key):
-        pass
-
-    def __setitem__(self, key, value):
-        self._set(value)
-        self._items[key] = value
-
-    def __delitem__(self, key):
-        self._del(key)
-        del self._items[key]
-
-    def __len__(self):
-        return len(self._items)
-
-    def insert(self, key, value):
-        self._set(key, value)
-        self._items.insert(key, value)
-
-
-class Parameters(BrickList):
+class Parameters(AnnotatingList):
     """Adds the PARAMETER role to parameters automatically."""
-    def _set(self, key, value):
+    def __init__(self, brick, *args, **kwargs):
+        self.brick = brick
+        super(Parameters, self).__init__(*args, **kwargs)
+
+    def _setitem(self, key, value):
         if isinstance(value, Variable):
             add_role(value, PARAMETER)
             add_annotation(value, self.brick)
 
 
-class Children(BrickList):
-    """Behaves exactly like a list, but annotates the variables."""
-    def _set(self, key, value):
+class Children(AnnotatingList):
+    """Adds the brick to the list of parents of its children."""
+    def __init__(self, brick, *args, **kwargs):
+        self.brick = brick
+        super(Children, self).__init__(*args, **kwargs)
+
+    def _setitem(self, key, value):
         if value is not None:
             value.parents.append(self.brick)
 
-    def _del(self, key):
+    def _delitem(self, key):
         child = self._items[key]
         if child is not None:
             child.parents.remove(self.brick)
@@ -283,7 +252,7 @@ class Application(object):
         args_names = args_names[1:]
 
         # Construct the ApplicationCall, used to store data in for this call
-        call = ApplicationCall(brick, bound_application)
+        call = ApplicationCall(bound_application)
         args = list(args)
         if 'application' in args_names:
             args.insert(args_names.index('application'), bound_application)
@@ -871,8 +840,6 @@ class ApplicationCall(Annotation):
 
     Parameters
     ----------
-    brick : :class:`Brick` instance
-        The brick whose application is called
     application : :class:`BoundApplication` instance
         The bound application (i.e. belong to a brick instance) object
         being called
@@ -891,18 +858,17 @@ class ApplicationCall(Annotation):
     <blocks.bricks.base.ApplicationCall object at ...>
 
     """
-    def __init__(self, brick, application):
-        self.brick = brick
+    def __init__(self, application):
         self.application = application
         super(ApplicationCall, self).__init__()
 
     def add_auxiliary_variable(self, variable, roles=None, name=None):
         if name:
             variable.name = _variable_name(
-                self.brick.name, self.application.name, name)
+                self.application.brick.name, self.application.name, name)
             variable.tag.name = name
             name = None
-        add_annotation(variable, self.brick)
+        add_annotation(variable, self.application.brick)
         return super(ApplicationCall, self).add_auxiliary_variable(
             variable, roles, name)
 
