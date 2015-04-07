@@ -4,11 +4,14 @@ import time
 from subprocess import Popen, PIPE
 
 try:
-    from bokeh.plotting import figure, output_server, show, cursession, push
+    from bokeh.plotting import (curdoc, cursession, figure, output_server,
+                                push, show)
     BOKEH_AVAILABLE = True
 except ImportError:
     BOKEH_AVAILABLE = False
 
+
+from blocks import config
 from blocks.extensions import SimpleExtension
 
 logger = logging.getLogger(__name__)
@@ -57,6 +60,12 @@ class Plot(SimpleExtension):
         it down you will lose your plots. If you want to store your plots,
         start the server manually using the ``bokeh-server`` command. Also
         see the warning above.
+    server_url : str, optional
+        Url of the bokeh-server. Ex: when starting the bokeh-server with
+        ``bokeh-server --ip 0.0.0.0`` at ``alice``, server_url should be
+        ``http://alice:5006``. When not specified the default configured
+        by ``bokeh_server`` in ``.blocksrc`` will be used. Defaults to
+        ``http://localhost:5006/``.
 
     """
     # Tableau 10 colors
@@ -64,13 +73,18 @@ class Plot(SimpleExtension):
               '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
     def __init__(self, document, channels, open_browser=False,
-                 start_server=False, **kwargs):
+                 start_server=False, server_url=None, **kwargs):
         if not BOKEH_AVAILABLE:
             raise ImportError
+
+        if server_url is None:
+            server_url = config.bokeh_server
+
         self.plots = {}
         self.start_server = start_server
+        self.document = document
+        self.server_url = server_url
         self._startserver()
-        output_server(document)
 
         # Create figures for each group of channels
         self.p = []
@@ -82,15 +96,15 @@ class Plot(SimpleExtension):
         if open_browser:
             show()
 
-        kwargs.setdefault('after_every_epoch', True)
+        kwargs.setdefault('after_epoch', True)
         kwargs.setdefault("before_first_epoch", True)
         super(Plot, self).__init__(**kwargs)
 
     def do(self, which_callback, *args):
         log = self.main_loop.log
-        iteration = log.status.iterations_done
+        iteration = log.status['iterations_done']
         i = 0
-        for key, value in log.current_row:
+        for key, value in log.current_row.items():
             if key in self.p_indices:
                 if key not in self.plots:
                     fig = self.p[self.p_indices[key]]
@@ -104,6 +118,7 @@ class Plot(SimpleExtension):
                 else:
                     self.plots[key].data['x'].append(iteration)
                     self.plots[key].data['y'].append(value)
+
                     cursession().store_objects(self.plots[key])
         push()
 
@@ -121,6 +136,7 @@ class Plot(SimpleExtension):
             logger.info('Plotting server PID: {}'.format(self.sub.pid))
         else:
             self.sub = None
+        output_server(self.document, url=self.server_url)
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -130,3 +146,4 @@ class Plot(SimpleExtension):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._startserver()
+        curdoc().add(*self.p)

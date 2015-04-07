@@ -4,9 +4,48 @@ Building with bricks
 Blocks is a framework that is supposed to make it easier to build complicated
 neural network models on top of Theano_. In order to do so, we introduce the
 concept of "bricks", which you might have already come across in :ref:`the
-introduction tutorial <model_building>`. Bricks are *parametrized Theano
-operations*. As such, they take Theano variables as inputs, and provide Theano
-variables as outputs.
+introduction tutorial <model_building>`. 
+
+.. _bricks:
+
+Bricks life-cycle
+-----------------
+
+Blocks uses "bricks" to build models. Bricks are **parametrized Theano 
+operations**. A brick is usually defined by a set of *attributes* and a set of
+*parameters*, the former specifying the attributes that define the Block
+(e.g., the number of input and output units), the latter representing the
+parameters of the brick object that will vary during learning (e.g., the
+weights and the biases).
+
+The life-cycle of a brick is as follows:
+
+1. **Configuration:** set (part of) the *attributes* of the brick. Can take
+   place when the brick object is created, by setting the arguments of the
+   constructor, or later, by setting the attributes of the brick object. No
+   Theano variable is created in this phase.
+
+2. **Allocation:** (optional) allocate the Theano shared variables for the
+   *parameters* of the Brick. When :meth:`.Brick.allocate` is called, the
+   required Theano variables are allocated and initialized by default to ``NaN``.
+
+3. **Application:** instantiate a part of the Theano computational graph,
+   linking the inputs and the outputs of the brick through its *parameters*
+   and according to the *attributes*. Cannot be performed (i.e., results in an
+   error) if the Brick object is not fully configured.
+
+4. **Initialization:** set the **numerical values** of the Theano variables
+   that store the *parameters* of the Brick. The user-provided value will
+   replace the default initialization value.
+
+.. note::
+   If the Theano variables of the brick object have not been allocated when 
+   :meth:`~.Application.apply` is called, Blocks will quietly call 
+   :meth:`.Brick.allocate`.
+
+Example
+^^^^^^^
+Bricks take Theano variables as inputs, and provide Theano variables as outputs. 
 
     >>> import theano
     >>> from theano import tensor
@@ -33,16 +72,16 @@ bias vector with values drawn from a particular distribution.
 
 So what happened here? We constructed a brick called :class:`.Linear` with a
 particular configuration: the input dimension (20) and output dimension (5).
-The moment we called :attr:`.Linear.apply`, the brick automatically constructed
+When we called :attr:`.Linear.apply`, the brick automatically constructed
 the `shared Theano variables`_ needed to store its parameters. In the lifecycle
 of a brick we refer to this as *allocation*.
 
     >>> linear.params
     [W, b]
     >>> linear.params[1].get_value() # doctest: +SKIP
-    array([ 0.,  0.,  0.,  0.,  0.])
+    array([ nan,  nan,  nan,  nan,  nan])
 
-By default, all our parameters are set to 0. To initialize them, simply
+By default, all our parameters are set to ``NaN``. To initialize them, simply
 call the :meth:`.Brick.initialize` method. This is the last step in the
 brick lifecycle: *initialization*.
 
@@ -68,7 +107,7 @@ initialization. We specified input and output dimensions, and specified the
 way in which weight matrices should be initialized. But consider the
 following case, which is quite common: We want to take the output of one
 model, and feed it as an input to another model, but the output and input
-dimension don't match, so we will need to add a linear transformation in
+dimensions don't match, so we will need to add a linear transformation in
 the middle.
 
 To support this use case, bricks allow for *lazy initialization*, which is
@@ -77,15 +116,14 @@ it fully (or at all):
 
     >>> linear2 = Linear(output_dim=10)
     >>> print(linear2.input_dim)
-    None
+    NoneAllocation
 
 Of course, as long as the brick is not configured, we cannot actually apply it!
 
     >>> linear2.apply(x)
     Traceback (most recent call last):
       ...
-    TypeError: Lazy initialization is enabled, so please make sure you have set
-    all the required configuration for this method call.
+    ValueError: allocation config not set: input_dim
 
 We can now easily configure our brick based on other bricks.
 
@@ -93,7 +131,7 @@ We can now easily configure our brick based on other bricks.
     >>> linear2.apply(x)
     linear_apply_output
 
-In the examples so far, allocation of the parameters has always happened
+In the examples so far, the allocation of the parameters has always happened
 implicitly when calling the ``apply`` methods, but it can also be called
 explicitly. Consider the following example:
 
@@ -155,7 +193,7 @@ brick:
 When dealing with children, the life cycle actually becomes a bit more
 complicated. (The full life cycle is documented as part of the
 :class:`.Brick` class.) Before allocating or initializing parameters, the
-parent brick will call its :meth:`.Brick.push_allocation_config` and
+parent brick calls its :meth:`.Brick.push_allocation_config` and
 :meth:`.Brick.push_initialization_config` methods, which configure the
 children. If you want to override the child configuration, you will need to
 call these methods manually, after which you can override the child bricks'

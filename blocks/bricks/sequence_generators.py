@@ -4,13 +4,15 @@ from abc import ABCMeta, abstractmethod
 from six import add_metaclass
 from theano import tensor
 
-from blocks.bricks import Initializable, Identity, MLP, Random
+from blocks.bricks import Initializable, Random, Bias
 from blocks.bricks.base import application, Brick, lazy
-from blocks.bricks.recurrent import BaseRecurrent
-from blocks.bricks.parallel import Fork, Distribute
+from blocks.bricks.parallel import Fork, Merge
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.recurrent import recurrent
-from blocks.utils import dict_subset, dict_union
+from blocks.bricks.attention import (
+    AbstractAttentionRecurrent, AttentionRecurrent)
+from blocks.roles import add_role, COST
+from blocks.utils import dict_union, dict_subset
 
 
 class BaseSequenceGenerator(Initializable):
@@ -33,8 +35,8 @@ class BaseSequenceGenerator(Initializable):
     * *Glimpses* are intermediate entities computed at every generation
       step from states, contexts and the previous step glimpses. They are
       computed in the transition's `apply` method when not given or by
-      explicitly calling the transition's `take_look` method. The set of
-      glimpses considered is specified in `transition.glimpse_names`.
+      explicitly calling the transition's `take_glimpses` method. The set
+      of glimpses considered is specified in `transition.glimpse_names`.
 
     The generation algorithm description follows.
 
@@ -47,7 +49,7 @@ class BaseSequenceGenerator(Initializable):
 
     2. Given the contexts, the current state and the glimpses from the
        previous step the attention mechanism hidden in the transition
-       produces current step glimpses. This happens in the `take_look`
+       produces current step glimpses. This happens in the `take_glimpses`
        method of the transition.
 
     3. Using the contexts, the fed back output from the previous step, the
@@ -82,7 +84,7 @@ class BaseSequenceGenerator(Initializable):
     ----------
     readout : instance of :class:`AbstractReadout`
         The readout component of the sequence generator.
-    transition : instance of :class:`AbstractAttentionTransition`
+    transition : instance of :class:`AbstractAttentionRecurrent`
         The transition component of the sequence generator.
     fork : :class:`.Brick`
         The brick to compute the transition's inputs from the feedback.
@@ -92,75 +94,122 @@ class BaseSequenceGenerator(Initializable):
     See :class:`.Initializable` for initialization parameters.
 
     """
-    @lazy
-    def __init__(self, readout, transition, fork=None, **kwargs):
+    @lazy()
+    def __init__(self, readout, transition, fork, **kwargs):
         super(BaseSequenceGenerator, self).__init__(**kwargs)
         self.readout = readout
         self.transition = transition
         self.fork = fork
 
-        self.state_names = transition.compute_states.outputs
-        self.context_names = transition.apply.contexts
-        self.glimpse_names = transition.take_look.outputs
         self.children = [self.readout, self.fork, self.transition]
 
-    def _push_allocation_config(self):
-        # Configure readout
-        # TODO: optional states? contexts?
-        state_dims = {name: self.transition.get_dim(name)
-                      for name in self.state_names}
-        context_dims = {name: self.transition.get_dim(name)
-                        for name in self.context_names}
-        self.glimpse_dims = {name: self.transition.get_dim(name)
-                             for name in self.glimpse_names}
-        self.readout.source_dims = dict_union(
-            state_dims, context_dims, self.glimpse_dims)
+    @property
+    def _state_names(self):
+        return self.transition.compute_states.outputs
 
-        # Configure fork
-        feedback_names = self.readout.feedback.outputs
-        if not len(feedback_names) == 1:
-            raise ValueError
-        self.fork.input_dim = self.readout.get_dim(feedback_names[0])
-        self.fork.output_dims = {
-            name: self.transition.get_dim(name)
-            for name in self.fork.apply.outputs}
+    @property
+    def _context_names(self):
+        return self.transition.apply.contexts
+
+    @property
+    def _glimpse_names(self):
+        return self.transition.take_glimpses.outputs
+
+    def _push_allocation_config(self):
+        # Configure readout. That involves `get_dim` requests
+        # to the transition. To make sure that it answers
+        # correctly we should finish its configuration first.
+        self.transition.push_allocation_config()
+        transition_sources = (self._state_names + self._context_names +
+                              self._glimpse_names)
+        self.readout.source_dims = [self.transition.get_dim(name)
+                                    if name in transition_sources
+                                    else self.readout.get_dim(name)
+                                    for name in self.readout.source_names]
+
+        # Configure fork. For similar reasons as outlined above,
+        # first push `readout` configuration.
+        self.readout.push_allocation_config()
+        feedback_name, = self.readout.feedback.outputs
+        self.fork.input_dim = self.readout.get_dim(feedback_name)
+        self.fork.output_dims = self.transition.get_dims(
+            self.fork.apply.outputs)
 
     @application
     def cost(self, application_call, outputs, mask=None, **kwargs):
-        """Returns generation costs for output sequences.
+        """Returns the average cost over the minibatch.
+
+        The cost is computed by averaging the sum of per token costs for
+        each sequence over the minibatch.
+
+        .. warning::
+            Note that, the computed cost can be problematic when batches
+            consist of vastly different sequence lengths.
 
         Parameters
         ----------
         outputs : :class:`~tensor.TensorVariable`
             The 3(2) dimensional tensor containing output sequences.
-            The dimension 0 must stand for time, the dimension 1 for the
-            position on the batch.
+            The axis 0 must stand for time, the axis 1 for the
+            position in the batch.
         mask : :class:`~tensor.TensorVariable`
             The binary matrix identifying fake outputs.
+
+        Returns
+        -------
+        cost : :class:`~tensor.Variable`
+            Theano variable for cost, computed by summing over timesteps
+            and then averaging over the minibatch.
 
         Notes
         -----
         The contexts are expected as keyword arguments.
 
+        Adds average cost per sequence element `AUXILIARY` variable to
+        the computational graph with name ``per_sequence_element``.
+
         """
-        batch_size = outputs.shape[-2]  # TODO Assumes only 1 features dim
+        # Compute the sum of costs
+        costs = self.cost_matrix(outputs, mask=mask, **kwargs)
+        cost = tensor.mean(costs.sum(axis=0))
+        add_role(cost, COST)
+
+        # Add auxiliary variable for per sequence element cost
+        application_call.add_auxiliary_variable(
+            (costs.sum() / mask.sum()) if mask is not None else costs.sum(),
+            name='per_sequence_element')
+        return cost
+
+    @application
+    def cost_matrix(self, application_call, outputs, mask=None, **kwargs):
+        """Returns generation costs for output sequences.
+
+        See Also
+        --------
+        :meth:`cost` : Scalar cost.
+
+        """
+        # We assume the data has axes (time, batch, features, ...)
+        batch_size = outputs.shape[1]
 
         # Prepare input for the iterative part
-        states = {name: kwargs[name] for name in self.state_names
-                  if name in kwargs}
-        contexts = {name: kwargs[name] for name in self.context_names}
+        states = dict_subset(kwargs, self._state_names, must_have=False)
+        contexts = dict_subset(kwargs, self._context_names)
         feedback = self.readout.feedback(outputs)
-        inputs = (self.fork.apply(feedback, return_dict=True)
-                  if self.fork else {'feedback': feedback})
+        inputs = self.fork.apply(feedback, as_dict=True)
 
         # Run the recurrent network
         results = self.transition.apply(
-            mask=mask, return_initial_states=True, return_dict=True,
+            mask=mask, return_initial_states=True, as_dict=True,
             **dict_union(inputs, states, contexts))
 
-        # Separate the deliverables
-        states = {name: results[name][:-1] for name in self.state_names}
-        glimpses = {name: results[name] for name in self.glimpse_names}
+        # Separate the deliverables. The last states are discarded: they
+        # are not used to predict any output symbol. The initial glimpses
+        # are discarded because they are not used for prediction.
+        # Remember, glimpses are computed _before_ output stage, states are
+        # computed after.
+        states = {name: results[name][:-1] for name in self._state_names}
+        glimpses = {name: results[name][1:] for name in self._glimpse_names}
 
         # Compute the cost
         feedback = tensor.roll(feedback, 1, 0)
@@ -171,12 +220,12 @@ class BaseSequenceGenerator(Initializable):
         readouts = self.readout.readout(
             feedback=feedback, **dict_union(states, glimpses, contexts))
         costs = self.readout.cost(readouts, outputs)
+        if mask is not None:
+            costs *= mask
 
-        for name, variable in glimpses.items():
+        for name, variable in list(glimpses.items()) + list(states.items()):
             application_call.add_auxiliary_variable(
                 variable.copy(), name=name)
-
-        # In case the user needs some glimpses or states or smth else
         return costs
 
     @recurrent
@@ -190,65 +239,29 @@ class BaseSequenceGenerator(Initializable):
 
         Notes
         -----
-            The contexts, previous states and glimpses are expected
-            as keyword arguments.
+        The contexts, previous states and glimpses are expected as keyword
+        arguments.
 
         """
-        states = {name: kwargs[name] for name in self.state_names}
-        contexts = {name: kwargs[name] for name in self.context_names}
-        glimpses = {name: kwargs[name] for name in self.glimpse_names}
+        states = dict_subset(kwargs, self._state_names)
+        contexts = dict_subset(kwargs, self._context_names)
+        glimpses = dict_subset(kwargs, self._glimpse_names)
 
-        next_glimpses = self.compute_next_glimpses(**kwargs)
-        next_readouts = self.compute_next_readouts(outputs, next_glimpses,
-                                                   **kwargs)
-        (next_states, others) = \
-            self.compute_next_states(next_readouts,
-                                     next_glimpses,
-                                     also_return=['next_outputs',
-                                                  'next_costs'],
-                                     **kwargs)
-        return (next_states + [others['next_outputs']]
-                + list(next_glimpses.values()) + [others['next_costs']])
-
-    @application
-    def compute_next_glimpses(self, **kwargs):
-        states = {name: kwargs[name] for name in self.state_names}
-        contexts = {name: kwargs[name] for name in self.context_names}
-        glimpses = {name: kwargs[name] for name in self.glimpse_names}
-
-        next_glimpses = self.transition.take_look(
-            return_dict=True, **dict_union(states, glimpses, contexts))
-        return next_glimpses
-
-    @application
-    def compute_next_readouts(self, outputs, next_glimpses, **kwargs):
-        states = {name: kwargs[name] for name in self.state_names}
-        contexts = {name: kwargs[name] for name in self.context_names}
-
+        next_glimpses = self.transition.take_glimpses(
+            as_dict=True, **dict_union(states, glimpses, contexts))
         next_readouts = self.readout.readout(
             feedback=self.readout.feedback(outputs),
             **dict_union(states, next_glimpses, contexts))
-        return next_readouts
-
-    @application
-    def compute_next_states(self, next_readouts, next_glimpses, **kwargs):
-        states = {name: kwargs[name] for name in self.state_names}
-        contexts = {name: kwargs[name] for name in self.context_names}
-
         next_outputs = self.readout.emit(next_readouts)
+        next_costs = self.readout.cost(next_readouts, next_outputs)
         next_feedback = self.readout.feedback(next_outputs)
-        next_inputs = (self.fork.apply(next_feedback, return_dict=True)
+        next_inputs = (self.fork.apply(next_feedback, as_dict=True)
                        if self.fork else {'feedback': next_feedback})
         next_states = self.transition.compute_states(
-            return_list=True,
+            as_list=True,
             **dict_union(next_inputs, states, next_glimpses, contexts))
-        next_costs = self.readout.cost(next_readouts, next_outputs)
-        also_return = kwargs.get("also_return")
-        if also_return:
-            local_vars = locals()
-            others = {name: local_vars[name] for name in also_return}
-            return next_states, others
-        return next_states
+        return (next_states + [next_outputs] +
+                list(next_glimpses.values()) + [next_costs])
 
     @generate.delegate
     def generate_delegate(self):
@@ -256,15 +269,16 @@ class BaseSequenceGenerator(Initializable):
 
     @generate.property('states')
     def generate_states(self):
-        return self.state_names + ['outputs'] + self.glimpse_names
+        return self._state_names + ['outputs'] + self._glimpse_names
 
     @generate.property('outputs')
     def generate_outputs(self):
-        return (self.state_names + ['outputs']
-                + self.glimpse_names + ['costs'])
+        return (self._state_names + ['outputs'] +
+                self._glimpse_names + ['costs'])
 
     def get_dim(self, name):
-        if name in self.state_names + self.context_names + self.glimpse_names:
+        if name in (self._state_names + self._context_names +
+                    self._glimpse_names):
             return self.transition.get_dim(name)
         elif name == 'outputs':
             return self.readout.get_dim(name)
@@ -274,7 +288,7 @@ class BaseSequenceGenerator(Initializable):
     def initial_state(self, name, batch_size, *args, **kwargs):
         if name == 'outputs':
             return self.readout.initial_outputs(batch_size)
-        elif name in self.state_names + self.glimpse_names:
+        elif name in self._state_names + self._glimpse_names:
             return self.transition.initial_state(name, batch_size,
                                                  *args, **kwargs)
         else:
@@ -287,10 +301,6 @@ class AbstractEmitter(Brick):
     """The interface for the emitter component of a readout."""
     @abstractmethod
     def emit(self, readouts):
-        pass
-
-    @abstractmethod
-    def emit_probs(self, readouts):
         pass
 
     @abstractmethod
@@ -324,66 +334,85 @@ class AbstractReadout(AbstractEmitter, AbstractFeedback):
         pass
 
 
-@add_metaclass(ABCMeta)
-class AbstractAttentionTransition(BaseRecurrent):
-    """A base class for a transition component of a sequence generator.
-
-    A recurrent transition combined with an attention mechanism.
-
-    """
-    @abstractmethod
-    def apply(self, **kwargs):
-        pass
-
-    @abstractmethod
-    def compute_states(self, **kwargs):
-        pass
-
-    @abstractmethod
-    def take_look(self, **kwargs):
-        pass
-
-
-@add_metaclass(ABCMeta)
-class Readout(AbstractReadout):
+class Readout(AbstractReadout, Initializable):
     """Readout brick with separated emitting and feedback parts.
 
     Parameters
     ----------
+    source_names : list
+        A list of the source names (outputs) that are needed for the
+        readout part e.g. ``['states']`` or ``['states', 'glimpses']``.
     readout_dim : int
         The dimension of the readout.
     emitter : an instance of :class:`AbstractEmitter`
         The emitter component.
-    feedbacker : an instance of :class:`AbstractFeedback`
+    feedback_brick : an instance of :class:`AbstractFeedback`
         The feedback component.
+    merge : :class:`.Brick`, optional
+        A brick that takes the sources given in `source_names` as an input
+        and combines them into a single output. If given, `merge_prototype`
+        cannot be given.
+    merge_prototype : :class:`.FeedForward`, optional
+        If `merge` isn't given, the transformation given by
+        `merge_prototype` is applied to each input before being summed. By
+        default a :class:`.Linear` transformation without biases is used.
+        If given, `merge` cannot be given.
+    post_merge : :class:`.Feedforward`, optional
+        This transformation is applied to the merged inputs. By default
+        :class:`.Bias` is used.
+    merged_dim : int, optional
+        The input dimension of `post_merge` i.e. the output dimension of
+        `merge` (or `merge_prototype`). If not give, it is assumed to be
+        the same as `readout_dim` (i.e. `post_merge` is assumed to not
+        change dimensions).
 
     """
-    @lazy
-    def __init__(self, readout_dim=None, emitter=None, feedbacker=None,
-                 **kwargs):
+    @lazy(allocation=['source_names', 'readout_dim'])
+    def __init__(self, source_names, readout_dim, emitter=None,
+                 feedback_brick=None, merge=None, merge_prototype=None,
+                 post_merge=None, merged_dim=None, **kwargs):
         super(Readout, self).__init__(**kwargs)
+        self.source_names = source_names
         self.readout_dim = readout_dim
 
         if not emitter:
             emitter = TrivialEmitter(readout_dim)
-        if not feedbacker:
-            feedbacker = TrivialFeedback(readout_dim)
+        if not feedback_brick:
+            feedback_brick = TrivialFeedback(readout_dim)
+        if not merge:
+            merge = Merge(input_names=source_names, prototype=merge_prototype)
+        if not post_merge:
+            post_merge = Bias(dim=readout_dim)
+        if not merged_dim:
+            merged_dim = readout_dim
         self.emitter = emitter
-        self.feedbacker = feedbacker
+        self.feedback_brick = feedback_brick
+        self.merge = merge
+        self.post_merge = post_merge
+        self.merged_dim = merged_dim
 
-        self.children = [self.emitter, self.feedbacker]
+        self.children = [self.emitter, self.feedback_brick,
+                         self.merge, self.post_merge]
 
     def _push_allocation_config(self):
         self.emitter.readout_dim = self.get_dim('readouts')
-        self.feedbacker.output_dim = self.get_dim('outputs')
+        self.feedback_brick.output_dim = self.get_dim('outputs')
+        self.merge.input_names = self.source_names
+        self.merge.input_dims = self.source_dims
+        self.merge.output_dim = self.merged_dim
+        self.post_merge.input_dim = self.merged_dim
+        self.post_merge.output_dim = self.readout_dim
+
+    @application
+    def readout(self, **kwargs):
+        merged = self.merge.apply(**{name: kwargs[name]
+                                     for name in self.merge.input_names})
+        merged = self.post_merge.apply(merged)
+        return merged
 
     @application
     def emit(self, readouts):
         return self.emitter.emit(readouts)
-
-    @application
-    def emit_probs(self, readouts):
-        return self.emitter.emit_probs(readouts)
 
     @application
     def cost(self, readouts, outputs):
@@ -395,57 +424,16 @@ class Readout(AbstractReadout):
 
     @application(outputs=['feedback'])
     def feedback(self, outputs):
-        return self.feedbacker.feedback(outputs)
+        return self.feedback_brick.feedback(outputs)
 
     def get_dim(self, name):
         if name == 'outputs':
             return self.emitter.get_dim(name)
         elif name == 'feedback':
-            return self.feedbacker.get_dim(name)
+            return self.feedback_brick.get_dim(name)
         elif name == 'readouts':
             return self.readout_dim
         return super(Readout, self).get_dim(name)
-
-
-class LinearReadout(Readout, Initializable):
-    """Readout computed as sum of linear projections.
-
-    Parameters
-    ----------
-    readout_dim : int
-        The dimension of the readout.
-    source_names : list of strs
-        The names of information sources.
-
-    Notes
-    -----
-    See :class:`.Initializable` for initialization parameters.
-
-    """
-    @lazy
-    def __init__(self, readout_dim, source_names, **kwargs):
-        super(LinearReadout, self).__init__(readout_dim, **kwargs)
-        self.readout_dim = readout_dim
-        self.source_names = source_names
-
-        self.projectors = [MLP(name="project_{}".format(name),
-                               activations=[Identity()])
-                           for name in self.source_names]
-        self.children.extend(self.projectors)
-
-    def _push_allocation_config(self):
-        super(LinearReadout, self)._push_allocation_config()
-        for name, projector in zip(self.source_names, self.projectors):
-            projector.dims[0] = self.source_dims[name]
-            projector.dims[-1] = self.readout_dim
-
-    @application
-    def readout(self, **kwargs):
-        projections = [projector.apply(kwargs[name]) for name, projector in
-                       zip(self.source_names, self.projectors)]
-        if len(projections) == 1:
-            return projections[0]
-        return sum(projections[1:], projections[0])
 
 
 class TrivialEmitter(AbstractEmitter):
@@ -456,8 +444,12 @@ class TrivialEmitter(AbstractEmitter):
     readout_dim : int
         The dimension of the readout.
 
+    Notes
+    -----
+    By default :meth:`cost` always returns zero tensor.
+
     """
-    @lazy
+    @lazy(allocation=['readout_dim'])
     def __init__(self, readout_dim, **kwargs):
         super(TrivialEmitter, self).__init__(**kwargs)
         self.readout_dim = readout_dim
@@ -467,8 +459,8 @@ class TrivialEmitter(AbstractEmitter):
         return readouts
 
     @application
-    def emit_probs(self, readouts):
-        raise ValueError('Cannot compute probabilities in TrivialEmitter')
+    def cost(self, readouts, outputs):
+        return tensor.zeros_like(outputs)
 
     @application
     def initial_outputs(self, batch_size, *args, **kwargs):
@@ -485,35 +477,46 @@ class SoftmaxEmitter(AbstractEmitter, Initializable, Random):
 
     Interprets readout elements as energies corresponding to their indices.
 
+    Parameters
+    ----------
+    initial_output : int or a scalar :class:`~theano.Variable`
+        The initial output.
+
     """
-    def _probs(self, readouts):
+    def __init__(self, initial_output=0, **kwargs):
+        self.initial_output = initial_output
+        super(SoftmaxEmitter, self).__init__(**kwargs)
+
+    @application
+    def probs(self, readouts):
         shape = readouts.shape
         return tensor.nnet.softmax(readouts.reshape(
             (tensor.prod(shape[:-1]), shape[-1]))).reshape(shape)
 
     @application
     def emit(self, readouts):
-        probs = self._probs(readouts)
-        return self.theano_rng.multinomial(pvals=probs).argmax(axis=-1)
-
-    @application
-    def emit_probs(self, readouts):
-        probs = self._probs(readouts)
-        return probs
+        probs = self.probs(readouts)
+        batch_size = probs.shape[0]
+        pvals_flat = probs.reshape((batch_size, -1))
+        generated = self.theano_rng.multinomial(pvals=pvals_flat)
+        return generated.reshape(probs.shape).argmax(axis=-1)
 
     @application
     def cost(self, readouts, outputs):
-        probs = self._probs(readouts)
+        # WARNING: unfortunately this application method works
+        # just fine when `readouts` and `outputs` have
+        # different dimensions. Be careful!
+        probs = self.probs(readouts)
         max_output = probs.shape[-1]
         flat_outputs = outputs.flatten()
         num_outputs = flat_outputs.shape[0]
         return -tensor.log(
-            probs.flatten()[max_output * tensor.arange(num_outputs)
-                            + flat_outputs].reshape(outputs.shape))
+            probs.flatten()[max_output * tensor.arange(num_outputs) +
+                            flat_outputs].reshape(outputs.shape))
 
     @application
     def initial_outputs(self, batch_size, *args, **kwargs):
-        return tensor.zeros((batch_size,), dtype='int64')
+        return self.initial_output * tensor.ones((batch_size,), dtype='int64')
 
     def get_dim(self, name):
         if name == 'outputs':
@@ -523,7 +526,7 @@ class SoftmaxEmitter(AbstractEmitter, Initializable, Random):
 
 class TrivialFeedback(AbstractFeedback):
     """A feedback brick for the case when readout are outputs."""
-    @lazy
+    @lazy(allocation=['output_dim'])
     def __init__(self, output_dim, **kwargs):
         super(TrivialFeedback, self).__init__(**kwargs)
         self.output_dim = output_dim
@@ -565,7 +568,7 @@ class LookupFeedback(AbstractFeedback, Initializable):
     @application
     def feedback(self, outputs):
         assert self.output_dim == 0
-        return self.lookup.lookup(outputs)
+        return self.lookup.apply(outputs)
 
     def get_dim(self, name):
         if name == 'feedback':
@@ -573,229 +576,7 @@ class LookupFeedback(AbstractFeedback, Initializable):
         return super(LookupFeedback, self).get_dim(name)
 
 
-class AttentionTransition(AbstractAttentionTransition, Initializable):
-    """Combines an attention mechanism and a recurrent transition.
-
-    This brick is assembled from three components: an attention mechanism,
-    a recurrent transition and a brick to make the first two work
-    together.  It is expected that among the contexts of the transition's
-    `apply` methods there is one, intended to be attended by the attention
-    mechanism, and another one serving as a mask for the first one.
-
-    Parameters
-    ----------
-    transition : :class:`.Brick`
-        The recurrent transition.
-    attention : :class:`.Brick`
-        The attention mechanism.
-    attended_name : str
-        The name of the attended context. If ``None``, the first context is
-        used.
-    attended_mask_name : str
-        The name of the mask for the attended context. If ``None``, the
-        second context is used.
-
-    Notes
-    -----
-    See :class:`.Initializable` for initialization parameters.
-
-    Currently lazy-only.
-
-    """
-    def __init__(self, transition, attention, distribute,
-                 attended_name=None, attended_mask_name=None,
-                 **kwargs):
-        super(AttentionTransition, self).__init__(**kwargs)
-        self.transition = transition
-        self.attention = attention
-        self.distribute = distribute
-
-        self.sequence_names = self.transition.apply.sequences
-        self.state_names = self.transition.apply.states
-        self.context_names = self.transition.apply.contexts
-
-        if not attended_name:
-            attended_name = self.context_names[0]
-        if not attended_mask_name:
-            attended_mask_name = self.context_names[1]
-        self.attended_name = attended_name
-        self.attended_mask_name = attended_mask_name
-
-        self.preprocessed_attended_name = "preprocessed_" + self.attended_name
-
-        self.glimpse_names = self.attention.take_look.outputs
-        # We need to determine which glimpses are fed back.
-        # Currently we extract it from `take_look` signature.
-        self.previous_glimpses_needed = [
-            name for name in self.glimpse_names
-            if name in self.attention.take_look.inputs]
-
-        self.children = [self.transition, self.attention, self.distribute]
-
-    def _push_allocation_config(self):
-        self.attention.state_dims = self.transition.get_dims(self.state_names)
-        self.attention.sequence_dim = self.transition.get_dim(
-            self.attended_name)
-        self.distribute.target_dims = dict_subset(
-            dict_union(
-                self.transition.get_dims(self.sequence_names)),
-            self.distribute.target_names)
-        self.distribute.source_dim = self.attention.get_dim(
-            self.distribute.source_name)
-
-    @application
-    def take_look(self, **kwargs):
-        r"""Compute glimpses with the attention mechanism.
-
-        Parameters
-        ----------
-        \*\*kwargs
-            Should contain contexts, previous step states and glimpses.
-
-        Returns
-        -------
-        glimpses : list of :class:`~tensor.TensorVariable`
-            Current step glimpses.
-
-        """
-        return self.attention.take_look(
-            kwargs[self.attended_name],
-            kwargs.get(self.preprocessed_attended_name),
-            mask=kwargs.get("mask"),
-            **dict_subset(kwargs,
-                          self.state_names + self.previous_glimpses_needed))
-
-    @take_look.property('outputs')
-    def take_look_outputs(self):
-        return self.glimpse_names
-
-    @application
-    def compute_states(self, **kwargs):
-        r"""Compute current states when glimpses have already been computed.
-
-        Parameters
-        ----------
-        \*\*kwargs
-            Should contain everything what `self.transition` needs
-            and in addition current glimpses.
-
-        Returns
-        -------
-        current_states : list of :class:`~tensor.TensorVariable`
-            Current states computed by `self.transition`.
-
-        """
-        sequences = dict_subset(kwargs, self.sequence_names, pop=True,
-                                must_have=False)
-        states = dict_subset(kwargs, self.state_names, pop=True)
-        glimpses = dict_subset(kwargs, self.glimpse_names, pop=True)
-        sequences.update(self.distribute.apply(
-            return_dict=True,
-            **dict_subset(dict_union(sequences, glimpses),
-                          self.distribute.apply.inputs)))
-        current_states = self.transition.apply(
-            iterate=False, return_list=True,
-            **dict_union(sequences, states, kwargs))
-        return current_states
-
-    @compute_states.property('outputs')
-    def compute_states_outputs(self):
-        return self.state_names
-
-    @recurrent
-    def do_apply(self, **kwargs):
-        r"""Process a sequence attending the attended context every step.
-
-        Parameters
-        ----------
-        \*\*kwargs
-            Should contain current inputs, previous step states, contexts,
-            the preprocessed attended context, previous step glimpses.
-
-        Returns
-        -------
-        outputs : list of :class:`~tensor.TensorVariable`
-            The current step states and glimpses.
-
-        """
-        attended = kwargs[self.attended_name]
-        preprocessed_attended = kwargs.pop(self.preprocessed_attended_name)
-        attended_mask = kwargs.get(self.attended_mask_name)
-
-        sequences = dict_subset(kwargs, self.sequence_names, pop=True,
-                                must_have=False)
-        states = dict_subset(kwargs, self.state_names, pop=True)
-        glimpses = dict_subset(kwargs, self.glimpse_names, pop=True)
-
-        current_glimpses = self.take_look(
-            mask=attended_mask, return_dict=True,
-            **dict_union(
-                states, glimpses,
-                {self.attended_name: attended,
-                 self.preprocessed_attended_name: preprocessed_attended}))
-        current_states = self.compute_states(
-            return_list=True,
-            **dict_union(sequences, states, current_glimpses, kwargs))
-        return current_states + list(current_glimpses.values())
-
-    @do_apply.property('sequences')
-    def do_apply_sequences(self):
-        return self.transition.apply.sequences
-
-    @do_apply.property('contexts')
-    def do_apply_contexts(self):
-        return self.transition.apply.contexts + [
-            self.preprocessed_attended_name]
-
-    @do_apply.property('states')
-    def do_apply_states(self):
-        return self.transition.apply.states + self.glimpse_names
-
-    @do_apply.property('outputs')
-    def do_apply_outputs(self):
-        return self.transition.apply.states + self.glimpse_names
-
-    @application
-    def apply(self, **kwargs):
-        """Preprocess a sequence attending the attended context at every step.
-
-        Preprocesses the attended context and runs :meth:`do_apply`. See
-        :meth:`do_apply` documentation for further information.
-
-        """
-        preprocessed_attended = self.attention.preprocess(
-            kwargs[self.attended_name])
-        return self.do_apply(
-            **dict_union(kwargs,
-                         {self.preprocessed_attended_name:
-                          preprocessed_attended}))
-
-    @apply.delegate
-    def apply_delegate(self):
-        # TODO: Nice interface for this trick?
-        return self.do_apply.__get__(self, None)
-
-    @apply.property('contexts')
-    def apply_contexts(self):
-        return self.transition.apply.contexts
-
-    @application
-    def initial_state(self, state_name, batch_size, **kwargs):
-        if state_name in self.glimpse_names:
-            return self.attention.initial_glimpses(
-                state_name, batch_size, kwargs[self.attended_name])
-        return self.transition.initial_state(state_name, batch_size, **kwargs)
-
-    def get_dim(self, name):
-        if name in self.glimpse_names:
-            return self.attention.get_dim(name)
-        if name == self.preprocessed_attended_name:
-            (original_name,) = self.attention.preprocess.outputs
-            return self.attention.get_dim(original_name)
-        return self.transition.get_dim(name)
-
-
-class FakeAttentionTransition(AbstractAttentionTransition, Initializable):
+class FakeAttentionRecurrent(AbstractAttentionRecurrent, Initializable):
     """Adds fake attention interface to a transition.
 
     Notes
@@ -805,7 +586,7 @@ class FakeAttentionTransition(AbstractAttentionTransition, Initializable):
 
     """
     def __init__(self, transition, **kwargs):
-        super(FakeAttentionTransition, self).__init__(**kwargs)
+        super(FakeAttentionRecurrent, self).__init__(**kwargs)
         self.transition = transition
 
         self.state_names = transition.apply.states
@@ -831,7 +612,7 @@ class FakeAttentionTransition(AbstractAttentionTransition, Initializable):
         return self.transition.apply
 
     @application(outputs=[])
-    def take_look(self, *args, **kwargs):
+    def take_glimpses(self, *args, **kwargs):
         return None
 
     @application
@@ -856,6 +637,10 @@ class SequenceGenerator(BaseSequenceGenerator):
     attention : :class:`.Brick`
         The attention mechanism to be added to ``transition``. Can be
         ``None``, in which case no attention mechanism is used.
+    add_contexts : bool
+        If ``True``, the :class:`AttentionRecurrent` wrapping the
+        `transition` will add additional contexts for the attended and
+        its mask.
 
     Notes
     -----
@@ -864,19 +649,16 @@ class SequenceGenerator(BaseSequenceGenerator):
 
     """
     def __init__(self, readout, transition, attention=None,
-                 fork_inputs=None, **kwargs):
-        if not fork_inputs:
-            fork_inputs = [name for name in transition.apply.sequences
-                           if name != 'mask']
-
-        fork = Fork(fork_inputs)
+                 add_contexts=True, **kwargs):
+        normal_inputs = [name for name in transition.apply.sequences
+                         if 'mask' not in name]
+        kwargs.setdefault('fork', Fork(normal_inputs))
         if attention:
-            distribute = Distribute(fork_inputs,
-                                    attention.take_look.outputs[0])
-            transition = AttentionTransition(transition, attention, distribute,
-                                             name="att_trans")
+            transition = AttentionRecurrent(
+                transition, attention,
+                add_contexts=add_contexts, name="att_trans")
         else:
-            transition = FakeAttentionTransition(transition,
-                                                 name="with_fake_attention")
+            transition = FakeAttentionRecurrent(transition,
+                                                name="with_fake_attention")
         super(SequenceGenerator, self).__init__(
-            readout, transition, fork, **kwargs)
+            readout, transition, **kwargs)

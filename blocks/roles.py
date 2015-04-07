@@ -1,3 +1,6 @@
+import re
+
+
 def add_role(var, role):
     r"""Add a role to a given Theano variable.
 
@@ -9,26 +12,26 @@ def add_role(var, role):
 
     Notes
     -----
-    Some roles are subroles of others (e.g. :const:`WEIGHTS` is a subrole
+    Some roles are subroles of others (e.g. :const:`WEIGHT` is a subrole
     of :const:`PARAMETER`). This function will not add a role if a more
     specific role has already been added. If you need to replace a role
-    with a parent role (e.g. replace :const:`WEIGHTS` with
+    with a parent role (e.g. replace :const:`WEIGHT` with
     :const:`PARAMETER`) you must do so manually.
 
     Examples
     --------
     >>> from theano import tensor
     >>> W = tensor.matrix()
-    >>> from blocks.roles import PARAMETER, WEIGHTS
+    >>> from blocks.roles import PARAMETER, WEIGHT
     >>> add_role(W, PARAMETER)
     >>> print(*W.tag.roles)
     PARAMETER
-    >>> add_role(W, WEIGHTS)
+    >>> add_role(W, WEIGHT)
     >>> print(*W.tag.roles)
-    WEIGHTS
+    WEIGHT
     >>> add_role(W, PARAMETER)
     >>> print(*W.tag.roles)
-    WEIGHTS
+    WEIGHT
 
     """
     roles = getattr(var.tag, 'roles', [])
@@ -39,10 +42,34 @@ def add_role(var, role):
     var.tag.roles = roles
 
 
+def has_roles(var, roles, match_all=False):
+    r"""Test if a variable has given roles taking subroles into account.
+
+    Parameters
+    ----------
+    var : :class:`~tensor.TensorVariable`
+        Variable being queried.
+    roles : an iterable of :class:`.VariableRole` instances.
+    match_all : bool, optional
+        If ``True``, checks if the variable has all given roles.
+        If ``False``, any of the roles is sufficient.
+        ``False`` by default.
+
+    """
+    var_roles = getattr(var.tag, 'roles', [])
+    matches = (any(isinstance(var_role, role.__class__) for
+                   var_role in var_roles) for role in roles)
+    return all(matches) if match_all else any(matches)
+
+
 class VariableRole(object):
     """Base class for all variable roles."""
+    def __eq__(self, other):
+        return self.__class__ == other.__class__
+
     def __repr__(self):
-        return self.__class__.__name__[:-4].upper()
+        return re.sub(r'(?!^)([A-Z]+)', r'_\1',
+                      self.__class__.__name__[:-4]).upper()
 
 
 class InputRole(VariableRole):
@@ -80,22 +107,29 @@ class AuxiliaryRole(VariableRole):
 AUXILIARY = AuxiliaryRole()
 
 
-class WeightsRole(ParameterRole):
+class WeightRole(ParameterRole):
     pass
 
 #: The weight matrices of linear transformations
-WEIGHTS = WeightsRole()
+WEIGHT = WeightRole()
 
 
-class BiasesRole(ParameterRole):
+class BiasRole(ParameterRole):
     pass
 
 #: Biases of linear transformations
-BIASES = BiasesRole()
+BIAS = BiasRole()
 
 
-class FiltersRole(WeightsRole):
+class FilterRole(WeightRole):
     pass
 
 #: The filters (kernels) of a convolution operation
-FILTERS = FiltersRole()
+FILTER = FilterRole()
+
+
+class DropoutRole(VariableRole):
+    pass
+
+#: Inputs with applied dropout
+DROPOUT = DropoutRole()

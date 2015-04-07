@@ -1,7 +1,8 @@
 from inspect import isclass
 import re
 
-from blocks.bricks.base import ApplicationCall, Brick
+from blocks.bricks.base import ApplicationCall, BoundApplication, Brick
+from blocks.roles import has_roles
 
 
 def get_annotation(var, cls):
@@ -43,18 +44,23 @@ class VariableFilter(object):
     ----------
     roles : list of :class:`.VariableRole` instances, optional
         Matches any variable which has one of the roles given.
-    bricks : list of :class:`.Brick` classes or instances, optional
-        Matches any variable whose brick is either one of the given
-        bricks, or whose brick is of given classes.
+    bricks : list of :class:`.Brick` classes or list of instances of
+             :class:`.Brick`, optional
+        Matches any variable that is instance of any of the given classes
+        or that is owned by any of the given brick instances.
     each_role : bool, optional
         If ``True``, the variable needs to have all given roles.  If
         ``False``, a variable matching any of the roles given will be
         returned. ``False`` by default.
     name : str, optional
+        The variable name. The Blocks name (i.e.
+        `x.tag.name`) is used.
+    name_regex : str, optional
         A regular expression for the variable name. The Blocks name (i.e.
         `x.tag.name`) is used.
-    application : :class:`.Application` instance
-        Matches a variable that was produced by the application given.
+    applications : list of :class:`.Application`, optional
+        Matches a variable that was produced by any of the applications
+        given.
 
     Notes
     -----
@@ -72,7 +78,7 @@ class VariableFilter(object):
 
     Examples
     --------
-    >>> from blocks.bricks import MLP, Linear, Sigmoid, Identity, BIASES
+    >>> from blocks.bricks import MLP, Linear, Sigmoid, Identity, BIAS
     >>> mlp = MLP(activations=[Identity(), Sigmoid()], dims=[20, 10, 20])
     >>> from theano import tensor
     >>> x = tensor.matrix()
@@ -80,19 +86,29 @@ class VariableFilter(object):
     >>> from blocks.graph import ComputationGraph
     >>> cg = ComputationGraph(y_hat)
     >>> from blocks.filter import VariableFilter
-    >>> var_filter = VariableFilter(roles=[BIASES],
+    >>> var_filter = VariableFilter(roles=[BIAS],
     ...                             bricks=[mlp.linear_transformations[0]])
     >>> var_filter(cg.variables)
     [b]
 
     """
     def __init__(self, roles=None, bricks=None, each_role=False, name=None,
-                 application=None):
+                 name_regex=None, applications=None):
+        if bricks is not None and not all(
+            isinstance(brick, Brick) or issubclass(brick, Brick)
+                for brick in bricks):
+            raise ValueError('`bricks` should be a list of Bricks')
+        if applications is not None and not all(
+            isinstance(application, BoundApplication)
+                for application in applications):
+            raise ValueError('`applications` should be a list of '
+                             'Applications')
         self.roles = roles
         self.bricks = bricks
         self.each_role = each_role
         self.name = name
-        self.application = application
+        self.name_regex = name_regex
+        self.applications = applications
 
     def __call__(self, variables):
         """Filter the given variables.
@@ -104,17 +120,8 @@ class VariableFilter(object):
         """
         if self.roles:
             filtered_variables = []
-            for var in variables:
-                var_roles = getattr(var.tag, 'roles', [])
-                if self.each_role:
-                    if all(any(isinstance(var_role, role.__class__) for
-                               var_role in var_roles) for role in self.roles):
-                        filtered_variables.append(var)
-                else:
-                    if any(any(isinstance(var_role, role.__class__) for
-                               var_role in var_roles) for role in self.roles):
-                        filtered_variables.append(var)
-            variables = filtered_variables
+            variables = [var for var in variables
+                         if has_roles(var, self.roles, self.each_role)]
         if self.bricks is not None:
             filtered_variables = []
             for var in variables:
@@ -125,17 +132,21 @@ class VariableFilter(object):
                     if isclass(brick) and isinstance(var_brick, brick):
                         filtered_variables.append(var)
                         break
-                    elif var_brick is brick:
+                    elif isinstance(brick, Brick) and var_brick is brick:
                         filtered_variables.append(var)
                         break
             variables = filtered_variables
         if self.name:
             variables = [var for var in variables
-                         if hasattr(var.tag, 'name')
-                         and re.match(self.name, var.tag.name)]
-        if self.application:
+                         if hasattr(var.tag, 'name') and
+                         self.name == var.tag.name]
+        if self.name_regex:
             variables = [var for var in variables
-                         if get_application_call(var)
-                         and get_application_call(var).application
-                         == self.application]
+                         if hasattr(var.tag, 'name') and
+                         re.match(self.name_regex, var.tag.name)]
+        if self.applications:
+            variables = [var for var in variables
+                         if get_application_call(var) and
+                         get_application_call(var).application in
+                         self.applications]
         return variables

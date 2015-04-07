@@ -5,7 +5,6 @@ from theano import tensor
 from theano.sandbox.rng_mrg import MRG_RandomStreams
 
 from blocks.bricks import MLP, Identity
-from blocks.bricks.base import Brick
 from blocks.graph import apply_noise, ComputationGraph
 from blocks.initialization import Constant
 from tests.bricks.test_bricks import TestBrick
@@ -15,8 +14,7 @@ floatX = theano.config.floatX
 
 def test_application_graph_auxiliary_vars():
     X = tensor.matrix('X')
-    Brick.lazy = True
-    brick = TestBrick()
+    brick = TestBrick(0)
     Y = brick.access_application_call(X)
     graph = ComputationGraph(outputs=[Y])
     test_val_found = False
@@ -31,6 +29,7 @@ def test_computation_graph():
     x = tensor.matrix('x')
     y = tensor.matrix('y')
     z = x + y
+    z.name = 'z'
     a = z.copy()
     a.name = 'a'
     b = z.copy()
@@ -59,6 +58,47 @@ def test_computation_graph():
     cg5 = ComputationGraph([w1])
     assert W in cg5.variables
     assert w1 in cg5.variables
+
+    # Test scan
+    s, _ = theano.scan(lambda inp, accum: accum + inp,
+                       sequences=x,
+                       outputs_info=tensor.zeros_like(x[0]))
+    scan = s.owner.inputs[0].owner.op
+    cg6 = ComputationGraph(s)
+    assert cg6.scans == [scan]
+    assert all(v in cg6.scan_variables for v in scan.inputs + scan.outputs)
+
+
+def test_computation_graph_variable_duplicate():
+    # Test if ComputationGraph.variables contains duplicates if some outputs
+    # are part of the computation graph
+    x, y = tensor.matrix('x'), tensor.matrix('y')
+    w = x + y
+    z = tensor.exp(w)
+
+    cg = ComputationGraph([z, w])
+    assert len(set(cg.variables)) == len(cg.variables)
+
+
+def test_replace():
+    # Test if replace works with outputs
+    x = tensor.scalar()
+    y = x + 1
+    cg = ComputationGraph([y])
+    doubled_cg = cg.replace([(y, 2 * y)])
+    out_val = doubled_cg.outputs[0].eval({x: 2})
+    assert out_val == 6.0
+
+
+def test_replace_multiple_inputs():
+    # Test if replace works on variables that are input to multiple nodes
+    x = tensor.scalar('x')
+    y = 2 * x
+    z = x + 1
+
+    cg = ComputationGraph([y, z]).replace({x: 0.5 * x})
+    assert_allclose(cg.outputs[0].eval({x: 1.0}), 1.0)
+    assert_allclose(cg.outputs[1].eval({x: 1.0}), 1.5)
 
 
 def test_apply_noise():

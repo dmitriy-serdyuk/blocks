@@ -12,12 +12,6 @@ variable. A configuration file is of the form:
 
    data_path: /home/user/datasets
 
-Which could be overwritten by using environment variables:
-
-.. code-block:: bash
-
-   $ BLOCKS_DATA_PATH=/home/users/other_datasets python
-
 If a setting is not configured and does not provide a default, a
 :class:`~.ConfigurationError` is raised when it is
 accessed.
@@ -26,15 +20,10 @@ Configuration values can be accessed as attributes of
 :const:`blocks.config`.
 
     >>> from blocks import config
-    >>> print(config.data_path) # doctest: +SKIP
-    '~/datasets'
+    >>> print(config.default_seed) # doctest: +SKIP
+    1
 
 The following configurations are supported:
-
-.. option:: data_path
-
-   The path where dataset files are stored. Can also be set using the
-   environment variable ``BLOCKS_DATA_PATH``.
 
 .. option:: default_seed
 
@@ -51,6 +40,17 @@ The following configurations are supported:
    is pickling or unpickling a complex structure with lots of objects, such
    as a big Theano computation graph.
 
+.. option:: bokeh_server
+
+   The default URL to use when contacting a Bokeh server for live plotting.
+   This setting is used by the :class:`~blocks.extensions.plot.Plot`. The
+   default is ``http://localhost:5006/``.
+
+.. option:: profile, BLOCKS_PROFILE
+
+   A boolean value which determines whether to print profiling information
+   at the end of a call to :meth:`.MainLoop.run`.
+
 .. _YAML: http://yaml.org/
 .. _environment variables:
    https://en.wikipedia.org/wiki/Environment_variable
@@ -59,6 +59,7 @@ The following configurations are supported:
 import logging
 import os
 
+import six
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ class Configuration(object):
             yaml_file = os.environ['BLOCKS_CONFIG']
         else:
             yaml_file = os.path.expanduser('~/.blocksrc')
-        if os.path.isfile(yaml_file):
+        if os.path.isfile(yaml_file) and os.path.getsize(yaml_file):
             with open(yaml_file) as f:
                 for key, value in yaml.safe_load(f).items():
                     if key not in self.config:
@@ -142,11 +143,18 @@ class Configuration(object):
         if default is not NOT_SET:
             self.config[key]['default'] = default
 
-config = Configuration()
+
+def bool_(val):
+    """Like `bool`, but the string 'False' evaluates to `False`."""
+    if isinstance(val, six.string_types) and val.lower() == 'false':
+        return False
+    return bool(val)
 
 # Define configuration options
-config.add_config('data_path', type_=str, env_var='BLOCKS_DATA_PATH')
+config = Configuration()
 config.add_config('default_seed', type_=int, default=1)
 config.add_config('recursion_limit', type_=int, default=10000)
-
+config.add_config('bokeh_server', type_=str, default='http://localhost:5006/')
+config.add_config('profile', type_=bool_, default=False,
+                  env_var='BLOCKS_PROFILE')
 config.load_yaml()
