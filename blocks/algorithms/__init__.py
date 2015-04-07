@@ -225,11 +225,11 @@ class GradientDescent(DifferentiableCostMinimizer):
         logger.info("The training algorithm is initialized")
 
     def process_batch(self, batch):
-        if not set(batch.keys()) == set([v.name for v in self.inputs]):
-            raise ValueError("mismatch of variable names and data sources" +
-                             variable_mismatch_error.format(
-                                 sources=batch.keys(),
-                                 variables=[v.name for v in self.inputs]))
+        #if not set(batch.keys()) == set([v.name for v in self.inputs]):
+        #    raise ValueError("mismatch of variable names and data sources" +
+        #                     variable_mismatch_error.format(
+        #                         sources=batch.keys(),
+        #                         variables=[v.name for v in self.inputs]))
         ordered_batch = [batch[v.name] for v in self.inputs]
         self._function(*ordered_batch)
 
