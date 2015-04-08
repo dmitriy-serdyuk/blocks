@@ -167,7 +167,7 @@ def main(mode, save_path, num_batches, data_path=None):
         reverser.weights_init = IsotropicGaussian(0.1)
         reverser.biases_init = Constant(0.0)
         reverser.push_initialization_config()
-        reverser.encoder.weghts_init = Orthogonal()
+        reverser.encoder.weights_init = Orthogonal()
         reverser.generator.transition.weights_init = Orthogonal()
 
         # Build the cost computation graph
@@ -204,10 +204,10 @@ def main(mode, save_path, num_batches, data_path=None):
         # Fetch variables useful for debugging
         generator = reverser.generator
         (energies,) = VariableFilter(
-            application=generator.readout.readout,
-            name="output")(cg.variables)
+            applications=[generator.readout.readout],
+            name_regex="output")(cg.variables)
         (activations,) = VariableFilter(
-            application=generator.transition.apply,
+            applications=[generator.transition.apply],
             name=generator.transition.apply.states[0])(cg.variables)
         max_length = named_copy(chars.shape[0], "max_length")
         cost_per_character = named_copy(

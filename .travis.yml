@@ -34,13 +34,14 @@ before_install:
   - export FUEL_DATA_PATH=$PWD
 install:
   # Install all Python dependencies
-  - conda install -q --yes python=$TRAVIS_PYTHON_VERSION mkl bokeh nose numpy pip coverage six scipy toolz
-  - pip install -q nose2[coverage-plugin] coveralls
+  - conda install -q --yes python=$TRAVIS_PYTHON_VERSION mkl --file req-travis-conda.txt
+  - pip install -q -r req-travis-pip.txt
 script:
   - pip install . -r requirements.txt # Tests setup.py
   - # Must export environment variable so that the subprocess is aware of it
   - export THEANO_FLAGS=floatX=$TESTS,optimizer=fast_compile
   - export FUEL_FLOATX=$TESTS
+  - export BLOCKS_PROFILE=true
   - # Running nose2 within coverage makes imports count towards coverage
   - bokeh-server &> /dev/null &
   - coverage run -p --source=blocks -m nose2.__main__ -v doctests

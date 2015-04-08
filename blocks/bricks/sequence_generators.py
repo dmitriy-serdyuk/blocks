@@ -6,7 +6,7 @@ from theano import tensor
 
 from blocks.bricks import Initializable, Random, Bias
 from blocks.bricks.base import application, Brick, lazy
-from blocks.bricks.parallel import Fork, Distribute, Merge
+from blocks.bricks.parallel import Fork, Merge
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.recurrent import recurrent
 from blocks.bricks.attention import (
@@ -94,7 +94,7 @@ class BaseSequenceGenerator(Initializable):
     See :class:`.Initializable` for initialization parameters.
 
     """
-    @lazy
+    @lazy()
     def __init__(self, readout, transition, fork, **kwargs):
         super(BaseSequenceGenerator, self).__init__(**kwargs)
         self.readout = readout
@@ -166,7 +166,7 @@ class BaseSequenceGenerator(Initializable):
         The contexts are expected as keyword arguments.
 
         Adds average cost per sequence element `AUXILIARY` variable to
-        the computational graph with name `~per_sequence_element`
+        the computational graph with name ``per_sequence_element``.
 
         """
         # Compute the sum of costs
@@ -186,7 +186,7 @@ class BaseSequenceGenerator(Initializable):
 
         See Also
         --------
-        :meth:`cost` documentation for parameters.
+        :meth:`cost` : Scalar cost.
 
         """
         # We assume the data has axes (time, batch, features, ...)
@@ -239,8 +239,8 @@ class BaseSequenceGenerator(Initializable):
 
         Notes
         -----
-            The contexts, previous states and glimpses are expected
-            as keyword arguments.
+        The contexts, previous states and glimpses are expected as keyword
+        arguments.
 
         """
         states = dict_subset(kwargs, self._state_names)
@@ -367,7 +367,7 @@ class Readout(AbstractReadout, Initializable):
         change dimensions).
 
     """
-    @lazy
+    @lazy(allocation=['source_names', 'readout_dim'])
     def __init__(self, source_names, readout_dim, emitter=None,
                  feedback_brick=None, merge=None, merge_prototype=None,
                  post_merge=None, merged_dim=None, **kwargs):
@@ -449,7 +449,7 @@ class TrivialEmitter(AbstractEmitter):
     By default :meth:`cost` always returns zero tensor.
 
     """
-    @lazy
+    @lazy(allocation=['readout_dim'])
     def __init__(self, readout_dim, **kwargs):
         super(TrivialEmitter, self).__init__(**kwargs)
         self.readout_dim = readout_dim
@@ -526,7 +526,7 @@ class SoftmaxEmitter(AbstractEmitter, Initializable, Random):
 
 class TrivialFeedback(AbstractFeedback):
     """A feedback brick for the case when readout are outputs."""
-    @lazy
+    @lazy(allocation=['output_dim'])
     def __init__(self, output_dim, **kwargs):
         super(TrivialFeedback, self).__init__(**kwargs)
         self.output_dim = output_dim
@@ -649,20 +649,16 @@ class SequenceGenerator(BaseSequenceGenerator):
 
     """
     def __init__(self, readout, transition, attention=None,
-                 fork_inputs=None, add_contexts=True, **kwargs):
-        if not fork_inputs:
-            fork_inputs = [name for name in transition.apply.sequences
-                           if name != 'mask']
-
-        fork = Fork(fork_inputs)
+                 add_contexts=True, **kwargs):
+        normal_inputs = [name for name in transition.apply.sequences
+                         if 'mask' not in name]
+        kwargs.setdefault('fork', Fork(normal_inputs))
         if attention:
-            distribute = Distribute(fork_inputs,
-                                    attention.take_glimpses.outputs[0])
             transition = AttentionRecurrent(
-                transition, attention, distribute,
+                transition, attention,
                 add_contexts=add_contexts, name="att_trans")
         else:
             transition = FakeAttentionRecurrent(transition,
                                                 name="with_fake_attention")
         super(SequenceGenerator, self).__init__(
-            readout, transition, fork, **kwargs)
+            readout, transition, **kwargs)
