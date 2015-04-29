@@ -9,6 +9,18 @@ hooked, try your hand at the :ref:`tutorials <tutorials>`.
 
 Blocks is developed in parallel with Fuel_, a dataset processing framework.
 
+.. warning::
+   Blocks is a new project which is still under development. As such, certain
+   (all) parts of the framework are subject to change.
+
+.. tip::
+
+   That said, if you are interested in using Blocks and run into any problems,
+   feel free to ask your question on the `mailing list`_. Also, don't hesitate
+   to file bug reports and feature requests by `making a GitHub issue`_.
+
+.. _mailing list: https://groups.google.com/forum/#!forum/blocks-users
+.. _making a GitHub issue: https://github.com/bartvm/blocks/issues/new
 .. _Fuel: https://github.com/bartvm/fuel
 
 .. _tutorials:
@@ -35,15 +47,6 @@ In-depth
    api/index.rst
    development/index.rst
 
-.. warning::
-   Blocks is a new project which is still under development. As such, certain
-   (all) parts of the framework are subject to change.
-
-   That said, if you are interested in using Blocks and run into any problems,
-   don't hesitate to file bug reports, feature requests, or simply ask for help,
-   by `making a GitHub issue`_.
-
-.. _making a GitHub issue: https://github.com/bartvm/blocks/issues/new
 
 .. _quickstart:
 
@@ -89,12 +92,13 @@ Load your training data using Fuel.
 >>> mnist_test = MNIST("test")
 >>> test_stream = DataStream(
 ...     dataset=mnist_test,
-...     iteration_scheme=SequentialScheme(mnist_train.num_examples, 1024))
+...     iteration_scheme=SequentialScheme(mnist_test.num_examples, 1024))
 
 And train!
 
+>>> from blocks.model import Model
 >>> main_loop = MainLoop(
-...     model=mlp, data_stream=train_stream,
+...     model=Model(cost), data_stream=train_stream,
 ...     algorithm=GradientDescent(
 ...         cost=cost, params=ComputationGraph(cost).parameters,
 ...         step_rule=Scale(learning_rate=0.1)),
@@ -104,7 +108,9 @@ And train!
 ...                     data_stream=test_stream,
 ...                     prefix="test"),
 ...                 Printing()])
->>> main_loop.run() # doctest: +SKIP
+>>> main_loop.run() # doctest: +ELLIPSIS
+<BLANKLINE>
+...
 
 Features
 --------

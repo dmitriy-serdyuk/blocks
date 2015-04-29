@@ -4,29 +4,14 @@ from six.moves import cPickle
 from blocks.main_loop import MainLoop
 from blocks.extensions import TrainingExtension, FinishAfter
 from blocks.utils import unpack
-
-
-class MockAlgorithm(object):
-    """An algorithm that only saves data.
-
-    Also checks that the initialization routine is only called once.
-
-    """
-    def __init__(self):
-        self._initialized = False
-
-    def initialize(self):
-        assert not self._initialized
-        self._initialized = True
-
-    def process_batch(self, batch):
-        self.batch = batch
+from tests import MockAlgorithm
 
 
 class WriteBatchExtension(TrainingExtension):
     """Writes data saved by MockAlgorithm to the log."""
     def after_batch(self, _):
-        self.main_loop.log.current_row.batch = self.main_loop.algorithm.batch
+        self.main_loop.log.current_row['batch'] = \
+            self.main_loop.algorithm.batch
 
 
 def test_main_loop():
@@ -50,17 +35,17 @@ def test_main_loop():
 
     finish_extension = FinishAfter()
     finish_extension.add_condition(
-        'after_epoch', predicate=lambda log: log.status.epochs_done == 2)
+        'after_epoch', predicate=lambda log: log.status['epochs_done'] == 2)
     main_loop = MainLoop(MockAlgorithm(), TestDataStream(),
                          extensions=[WriteBatchExtension(),
                                      finish_extension])
     main_loop.run()
 
-    assert main_loop.log.status.iterations_done == 5
-    assert main_loop.log.status._epoch_ends == [3, 5]
-    assert len(list(main_loop.log)) == 7
+    assert main_loop.log.status['iterations_done'] == 5
+    assert main_loop.log.status['_epoch_ends'] == [3, 5]
+    assert len(main_loop.log) == 5
     for i in range(1, 6):
-        assert main_loop.log[i].batch == dict(data=i)
+        assert main_loop.log[i]['batch'] == dict(data=i)
 
 
 def test_training_resumption():
@@ -71,7 +56,7 @@ def test_training_resumption():
             extensions=[WriteBatchExtension(),
                         FinishAfter(after_n_batches=14)])
         main_loop.run()
-        assert main_loop.log.status.iterations_done == 14
+        assert main_loop.log.status['iterations_done'] == 14
 
         if with_serialization:
             main_loop = cPickle.loads(cPickle.dumps(main_loop))
@@ -81,12 +66,12 @@ def test_training_resumption():
              if isinstance(ext, FinishAfter)], singleton=True)
         finish_after.add_condition(
             "after_batch",
-            predicate=lambda log: log.status.iterations_done == 27)
+            predicate=lambda log: log.status['iterations_done'] == 27)
         main_loop.run()
-        assert main_loop.log.status.iterations_done == 27
-        assert main_loop.log.status.epochs_done == 2
+        assert main_loop.log.status['iterations_done'] == 27
+        assert main_loop.log.status['epochs_done'] == 2
         for i in range(27):
-            assert main_loop.log[i + 1].batch == {"data": i % 10}
+            assert main_loop.log[i + 1]['batch'] == {"data": i % 10}
 
     do_test(False)
     do_test(True)

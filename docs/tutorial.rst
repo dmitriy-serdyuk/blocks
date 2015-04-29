@@ -1,9 +1,8 @@
 Introduction tutorial
 =====================
 
-In this tutorial we will examine the example from the :ref:`quickstart
-<quickstart>` use the Blocks framework to train a `multilayer perceptron`_ (MLP) to
-perform handwriting recognition on the `MNIST handwritten digit database`_.
+In this tutorial we will perform handwriting recognition by training a
+`multilayer perceptron`_ (MLP) on the `MNIST handwritten digit database`_.
 
 The Task
 --------
@@ -21,14 +20,14 @@ The Model
 We will train a simple MLP with a single hidden layer that uses the rectifier_
 activation function. Our output layer will consist of a softmax_ function with
 10 units; one for each class. Mathematically speaking, our model is parametrized
-by the parameters :math:`\mathbf{\theta}`, defined as the weight matrices
+by :math:`\mathbf{\theta}`, defined as the weight matrices
 :math:`\mathbf{W}^{(1)}` and :math:`\mathbf{W}^{(2)}`, and bias vectors
 :math:`\mathbf{b}^{(1)}` and :math:`\mathbf{b}^{(2)}`. The rectifier activation
 function is defined as
 
 .. math:: \mathrm{ReLU}(\mathbf{x})_i = \max(0, \mathbf{x}_i)
 
-and our softmax output function is defined
+and our softmax output function is defined as
 
 .. math:: \mathrm{softmax}(\mathbf{x})_i = \frac{e^{\mathbf{x}_i}}{\sum_{j=1}^n e^{\mathbf{x}_j}}
 
@@ -53,6 +52,10 @@ means we will minimize the sum of
 
 Building the model
 ------------------
+Blocks uses "bricks" to build models. Bricks are **parametrized Theano 
+operations**. You can read more about it in the 
+:ref:`building with bricks <bricks>` tutorial.
+
 Constructing the model with Blocks is very simple. We start by defining the
 input variable using Theano.
 
@@ -73,17 +76,15 @@ For the sake of this tutorial, we will go through building an MLP the long way.
 For a much quicker way, skip right to the end of the next section. We begin
 with applying the linear transformations and activations.
 
+We start by initializing bricks with certain parameters e.g. ``input_dim``.
+After initialization we can apply our bricks on Theano variables to build the model
+we want. We'll talk more about bricks in the next tutorial, :doc:`bricks_overview`.
+
 >>> from blocks.bricks import Linear, Rectifier, Softmax
 >>> input_to_hidden = Linear(name='input_to_hidden', input_dim=784, output_dim=100)
 >>> h = Rectifier().apply(input_to_hidden.apply(x))
 >>> hidden_to_output = Linear(name='hidden_to_output', input_dim=100, output_dim=10)
 >>> y_hat = Softmax().apply(hidden_to_output.apply(h))
-
-Blocks uses "bricks" to build models. Bricks are parametrized Theano
-operations. What this means is that we start by initializing bricks with
-certain parameters e.g. ``input_dim``. After initialization we can apply our
-bricks on Theano variables to build the model we want. We'll talk more about
-bricks in the next tutorial, :doc:`bricks_overview`.
 
 Loss function and regularization
 --------------------------------
@@ -94,21 +95,20 @@ we will need the Theano variable representing the target labels.
 >>> from blocks.bricks.cost import CategoricalCrossEntropy
 >>> cost = CategoricalCrossEntropy().apply(y.flatten(), y_hat)
 
-To make sure that our network doesn't overfit we can use regularization, that
-is, we will penalize the complexity of the model. We will use
-:math:`L2`-regularization, also known as *weight decay*. So our final objective
-function is:
+To reduce the risk of overfitting, we can penalize excessive values of
+the parameters by adding a :math:`L2`-regularization term (also known as
+*weight decay*) to the objective function:
 
 .. math:: l(\mathbf{f}(\mathbf{x}), y) = -\log f(\mathbf{x})_y + \lambda_1\|\mathbf{W}^{(1)}\|^2 + \lambda_2\|\mathbf{W}^{(2)}\|^2
 
 To get the weights from our model, we will use Blocks' annotation features (read
 more about them in the :doc:`cg` tutorial).
 
->>> from blocks.bricks import WEIGHTS
+>>> from blocks.bricks import WEIGHT
 >>> from blocks.graph import ComputationGraph
 >>> from blocks.filter import VariableFilter
 >>> cg = ComputationGraph(cost)
->>> W1, W2 = VariableFilter(roles=[WEIGHTS])(cg.variables)
+>>> W1, W2 = VariableFilter(roles=[WEIGHT])(cg.variables)
 >>> cost = cost + 0.005 * (W1 ** 2).sum() + 0.005 * (W2 ** 2).sum()
 >>> cost.name = 'cost_with_regularization'
 
@@ -130,10 +130,11 @@ have used the :class:`.MLP` class instead.
 Initializing the parameters
 ---------------------------
 When we constructed the :class:`.Linear` bricks to build our
-model, they automatically initialized Theano shared variables to store their
-parameters in.  All of these parameters were set to 0. Before we start training
-our network, we will want to initialize these parameters by sampling them from
-a particular probability distribution. Bricks can do this for you.
+model, they automatically allocated Theano shared variables to store their
+parameters in.  All of these parameters were initially set to ``NaN``. Before 
+we start training our network, we will want to initialize these parameters 
+by sampling them from a particular probability distribution. Bricks can do this 
+for you.
 
 >>> from blocks.initialization import IsotropicGaussian, Constant
 >>> input_to_hidden.weights_init = hidden_to_output.weights_init = IsotropicGaussian(0.01)
@@ -151,12 +152,12 @@ Training your model
 -------------------
 Besides helping you build models, Blocks also provides the main other features
 needed to train a model. It has a set of training algorithms (like SGD), an
-interface to datasets, and a training loop that allows you to monitoring and
+interface to datasets, and a training loop that allows you to monitor and
 control the training process.
 
 We want to train our model on the training set of MNIST. We load the data using
 the Fuel_ framework. You'll need to configure Fuel's data path so that it knows
-where to find the MNIST files. You can do this by creating a configuration file.
+where to find the MNIST files. You can do this by creating a configuration file:
 
 .. code-block:: bash
 
@@ -186,7 +187,8 @@ of size 256.
 >>> data_stream = DataStream(mnist, iteration_scheme=SequentialScheme(
 ...     mnist.num_examples, batch_size=256))
 
-As our algorithm we will use straightforward SGD with a fixed learning rate.
+The training algorithm we will use is straightforward SGD with a fixed
+learning rate.
 
 >>> from blocks.algorithms import GradientDescent, Scale
 >>> algorithm = GradientDescent(cost=cost, params=cg.parameters,
@@ -207,8 +209,8 @@ extension.
 >>> monitor = DataStreamMonitoring(
 ...     variables=[cost], data_stream=data_stream_test, prefix="test")
 
-We can use the :class:`.MainLoop` to combine all the different
-bits and pieces now. We use two more extensions to make our training stop after
+We can now use the :class:`.MainLoop` to combine all the different
+bits and pieces. We use two more extensions to make our training stop after
 a single epoch and to make sure that our progress is printed.
 
 >>> from blocks.main_loop import MainLoop
@@ -253,7 +255,7 @@ Log records from the iteration 235:
 .. _multilayer perceptron: https://en.wikipedia.org/wiki/Multilayer_perceptron
 .. _MNIST handwritten digit database: http://yann.lecun.com/exdb/mnist/
 .. _rectifier: https://en.wikipedia.org/wiki/Rectifier_%28neural_networks%29
-.. _softmax: https://en.wikipedia.org/wiki/Softmax
+.. _softmax: https://en.wikipedia.org/wiki/Softmax_function
 .. _stochastic gradient descent: https://en.wikipedia.org/wiki/Stochastic_gradient_descent
 .. _doctest mode: http://ipython.org/ipython-doc/dev/interactive/tips.html#run-doctests
 .. _download the MNIST files: http://yann.lecun.com/exdb/mnist/

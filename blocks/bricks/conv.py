@@ -3,7 +3,7 @@ from theano.tensor.signal.downsample import max_pool_2d, DownsampleFactorMax
 
 from blocks.bricks import Initializable, Feedforward, Sequence
 from blocks.bricks.base import application, Brick, lazy
-from blocks.roles import add_role, FILTERS, BIASES
+from blocks.roles import add_role, FILTER, BIAS
 from blocks.utils import shared_floatx_nans
 
 
@@ -38,7 +38,7 @@ class Convolutional(Initializable):
         details. Defaults to 'valid'.
 
     """
-    @lazy
+    @lazy(allocation=['filter_size', 'num_filters', 'num_channels'])
     def __init__(self, filter_size, num_filters, num_channels, batch_size=None,
                  image_size=None, step=(1, 1), border_mode='valid', **kwargs):
         super(Convolutional, self).__init__(**kwargs)
@@ -54,12 +54,12 @@ class Convolutional(Initializable):
     def _allocate(self):
         W = shared_floatx_nans((self.num_filters, self.num_channels) +
                                self.filter_size, name='W')
-        add_role(W, FILTERS)
+        add_role(W, FILTER)
         self.params.append(W)
         self.add_auxiliary_variable(W.norm(2), name='W_norm')
         if self.use_bias:
             b = shared_floatx_nans(self.get_dim('output'), name='b')
-            add_role(b, BIASES)
+            add_role(b, BIAS)
             self.params.append(b)
             self.add_auxiliary_variable(b.norm(2), name='b_norm')
 
@@ -137,7 +137,7 @@ class MaxPooling(Initializable, Feedforward):
         two dimensions will be used to calculate the output dimension.
 
     """
-    @lazy
+    @lazy(allocation=['pooling_size'])
     def __init__(self, pooling_size, step=None, input_dim=None, **kwargs):
         super(MaxPooling, self).__init__(**kwargs)
 
@@ -185,10 +185,12 @@ class ConvolutionalActivation(Sequence, Initializable):
         The application method to apply after convolution (i.e.
         the nonlinear activation function)
 
-    See :class:`Convolutional` for explanation of other parameters.
+    See Also
+    --------
+    :class:`Convolutional` : For the documentation of other parameters.
 
     """
-    @lazy
+    @lazy(allocation=['filter_size', 'num_filters', 'num_channels'])
     def __init__(self, activation, filter_size, num_filters, num_channels,
                  batch_size=None, image_size=None, step=(1, 1),
                  border_mode='valid', **kwargs):
@@ -229,15 +231,18 @@ class ConvolutionalLayer(Sequence, Initializable):
         The application method to apply in the detector stage (i.e. the
         nonlinearity before pooling. Needed for ``__init__``.
 
-    See :class:`Convolutional` and :class:`MaxPooling` for explanations of
-    other parameters.
+    See Also
+    --------
+    :class:`Convolutional` : Documentation of convolution arguments.
+    :class:`MaxPooling` : Documentation of pooling arguments.
 
     Notes
     -----
     Uses max pooling.
 
     """
-    @lazy
+    @lazy(allocation=['filter_size', 'num_filters', 'pooling_size',
+                      'num_channels'])
     def __init__(self, activation, filter_size, num_filters, pooling_size,
                  num_channels, conv_step=(1, 1), pooling_step=None,
                  batch_size=None, image_size=None, border_mode='valid',
@@ -256,12 +261,13 @@ class ConvolutionalLayer(Sequence, Initializable):
         self.pooling_size = pooling_size
         self.conv_step = conv_step
         self.pooling_step = pooling_step
+        self.batch_size = batch_size
         self.border_mode = border_mode
         self.image_size = image_size
 
     def _push_allocation_config(self):
         for attr in ['filter_size', 'num_filters', 'num_channels',
-                     'border_mode', 'image_size']:
+                     'batch_size', 'border_mode', 'image_size']:
             setattr(self.convolution, attr, getattr(self, attr))
         self.convolution.step = self.conv_step
         self.convolution._push_allocation_config()
@@ -272,6 +278,7 @@ class ConvolutionalLayer(Sequence, Initializable):
         self.pooling.input_dim = pooling_input_dim
         self.pooling.pooling_size = self.pooling_size
         self.pooling.step = self.pooling_step
+        self.pooling.batch_size = self.batch_size
 
     def get_dim(self, name):
         if name == 'input_':
@@ -312,7 +319,7 @@ class ConvolutionalSequence(Sequence, Initializable, Feedforward):
     layer by the :meth:`~.Brick.push_allocation_config` method.
 
     """
-    @lazy
+    @lazy(allocation=['num_channels'])
     def __init__(self, layers, num_channels, batch_size=None, image_size=None,
                  **kwargs):
         self.layers = layers

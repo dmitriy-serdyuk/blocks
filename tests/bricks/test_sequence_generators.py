@@ -1,5 +1,5 @@
 import numpy
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_equal
 
 import theano
 from theano import tensor
@@ -9,10 +9,12 @@ from blocks.bricks.base import application
 from blocks.bricks.recurrent import SimpleRecurrent, GatedRecurrent
 from blocks.bricks.attention import SequenceContentAttention
 from blocks.bricks.sequence_generators import (
-    SequenceGenerator, LinearReadout, TrivialEmitter,
+    SequenceGenerator, Readout, TrivialEmitter,
     SoftmaxEmitter, LookupFeedback)
+from blocks.filter import VariableFilter
 from blocks.graph import ComputationGraph
 from blocks.initialization import Orthogonal, IsotropicGaussian, Constant
+from blocks.roles import AUXILIARY
 
 floatX = theano.config.floatX
 
@@ -40,23 +42,40 @@ def test_sequence_generator():
     transition = SimpleRecurrent(activation=Tanh(), dim=dim,
                                  weights_init=Orthogonal())
     generator = SequenceGenerator(
-        LinearReadout(readout_dim=output_dim, source_names=["states"],
-                      emitter=TestEmitter()),
+        Readout(readout_dim=output_dim, source_names=["states"],
+                emitter=TestEmitter()),
         transition,
         weights_init=IsotropicGaussian(0.1), biases_init=Constant(0.0),
         seed=1234)
     generator.initialize()
 
-    # Test 'cost' method
+    # Test 'cost_matrix' method
     y = tensor.tensor3('y')
     mask = tensor.matrix('mask')
-    costs = generator.cost(y, mask)
+    costs = generator.cost_matrix(y, mask)
     assert costs.ndim == 2
-    costs_val = theano.function([y, mask], [costs])(
-        rng.uniform(size=(n_steps, batch_size, output_dim)).astype(floatX),
-        numpy.ones((n_steps, batch_size), dtype=floatX))[0]
+    y_test = rng.uniform(size=(n_steps, batch_size, output_dim)).astype(floatX)
+    m_test = numpy.ones((n_steps, batch_size), dtype=floatX)
+    costs_val = theano.function([y, mask], [costs])(y_test, m_test)[0]
     assert costs_val.shape == (n_steps, batch_size)
     assert_allclose(costs_val.sum(), 115.593, rtol=1e-5)
+
+    # Test 'cost' method
+    cost = generator.cost(y, mask)
+    assert cost.ndim == 0
+    cost_val = theano.function([y, mask], [cost])(y_test, m_test)
+    assert_allclose(cost_val, 3.8531, rtol=1e-5)
+
+    # Test 'AUXILIARY' variable 'per_sequence_element' in 'cost' method
+    cg = ComputationGraph([cost])
+    var_filter = VariableFilter(roles=[AUXILIARY])
+    aux_var_name = '_'.join([generator.name, generator.cost.name,
+                             'per_sequence_element'])
+    cost_per_el = [el for el in var_filter(cg.variables)
+                   if el.name == aux_var_name][0]
+    assert cost_per_el.ndim == 0
+    cost_per_el_val = theano.function([y, mask], [cost_per_el])(y_test, m_test)
+    assert_allclose(cost_per_el_val, 0.38531, rtol=1e-5)
 
     # Test 'generate' method
     states, outputs, costs = [variable.eval() for variable in
@@ -89,28 +108,48 @@ def test_integer_sequence_generator():
     batch_size = 30
     n_steps = 10
 
-    transition = GatedRecurrent(activation=Tanh(), dim=dim,
+    transition = GatedRecurrent(dim=dim, activation=Tanh(),
                                 weights_init=Orthogonal())
     generator = SequenceGenerator(
-        LinearReadout(readout_dim=readout_dim, source_names=["states"],
-                      emitter=SoftmaxEmitter(theano_seed=1234),
-                      feedback_brick=LookupFeedback(readout_dim,
-                                                    feedback_dim)),
+        Readout(readout_dim=readout_dim, source_names=["states"],
+                emitter=SoftmaxEmitter(theano_seed=1234),
+                feedback_brick=LookupFeedback(readout_dim,
+                                              feedback_dim)),
         transition,
         weights_init=IsotropicGaussian(0.1), biases_init=Constant(0),
         seed=1234)
     generator.initialize()
 
+    # Test 'cost_matrix' method
     y = tensor.lmatrix('y')
     mask = tensor.matrix('mask')
-    costs = generator.cost(y, mask)
+    costs = generator.cost_matrix(y, mask)
     assert costs.ndim == 2
-    costs_val = theano.function([y, mask], [costs])(
-        rng.randint(readout_dim, size=(n_steps, batch_size)),
-        numpy.ones((n_steps, batch_size), dtype=floatX))[0]
+    costs_fun = theano.function([y, mask], [costs])
+    y_test = rng.randint(readout_dim, size=(n_steps, batch_size))
+    m_test = numpy.ones((n_steps, batch_size), dtype=floatX)
+    costs_val = costs_fun(y_test, m_test)[0]
     assert costs_val.shape == (n_steps, batch_size)
     assert_allclose(costs_val.sum(), 482.827, rtol=1e-5)
 
+    # Test 'cost' method
+    cost = generator.cost(y, mask)
+    assert cost.ndim == 0
+    cost_val = theano.function([y, mask], [cost])(y_test, m_test)
+    assert_allclose(cost_val, 16.0942, rtol=1e-5)
+
+    # Test 'AUXILIARY' variable 'per_sequence_element' in 'cost' method
+    cg = ComputationGraph([cost])
+    var_filter = VariableFilter(roles=[AUXILIARY])
+    aux_var_name = '_'.join([generator.name, generator.cost.name,
+                             'per_sequence_element'])
+    cost_per_el = [el for el in var_filter(cg.variables)
+                   if el.name == aux_var_name][0]
+    assert cost_per_el.ndim == 0
+    cost_per_el_val = theano.function([y, mask], [cost_per_el])(y_test, m_test)
+    assert_allclose(cost_per_el_val, 1.60942, rtol=1e-5)
+
+    # Test generate
     states, outputs, costs = generator.generate(
         iterate=True, batch_size=batch_size, n_steps=n_steps)
     cg = ComputationGraph(states + outputs + costs)
@@ -124,6 +163,12 @@ def test_integer_sequence_generator():
     assert_allclose(states_val.sum(), -17.91811, rtol=1e-5)
     assert_allclose(costs_val.sum(), 482.863, rtol=1e-5)
     assert outputs_val.sum() == 630
+
+    # Test masks agnostic results of cost
+    cost1 = costs_fun([[1], [2]], [[1], [1]])[0]
+    cost2 = costs_fun([[3, 1], [4, 2], [2, 0]],
+                      [[1, 1], [1, 1], [1, 0]])[0]
+    assert_allclose(cost1.sum(), cost2[:, 1].sum(), rtol=1e-5)
 
 
 class TestTransition(SimpleRecurrent):
@@ -180,10 +225,12 @@ def test_with_attention():
     transition = TestTransition(
         dim=inp_dim, attended_dim=attended_dim, activation=Identity())
     attention = SequenceContentAttention(
-        transition.apply.states, match_dim=inp_dim)
+        state_names=transition.apply.states, match_dim=inp_dim)
     generator = SequenceGenerator(
-        LinearReadout(
-            readout_dim=inp_dim, source_names=["states", "glimpses"],
+        Readout(
+            readout_dim=inp_dim,
+            source_names=[transition.apply.states[0],
+                          attention.take_glimpses.outputs[0]],
             emitter=TestEmitter()),
         transition=transition,
         attention=attention,
@@ -191,19 +238,20 @@ def test_with_attention():
         add_contexts=False, seed=1234)
     generator.initialize()
 
-    # Test 'cost' method
+    # Test 'cost_matrix' method
     attended = tensor.tensor3("attended")
     attended_mask = tensor.matrix("attended_mask")
     outputs = tensor.tensor3('outputs')
     mask = tensor.matrix('mask')
-    costs = generator.cost(outputs, mask,
-                           attended=attended, attended_mask=attended_mask)
+    costs = generator.cost_matrix(outputs, mask,
+                                  attended=attended,
+                                  attended_mask=attended_mask)
     costs_vals = costs.eval({outputs: output_vals,
                              mask: output_mask_vals,
                              attended: attended_vals,
                              attended_mask: attended_mask_vals})
     assert costs_vals.shape == (inp_len, batch_size)
-    assert_allclose(costs_vals.sum(), 33.6583, rtol=1e-5)
+    assert_allclose(costs_vals.sum(), 13.5042, rtol=1e-5)
 
     # Test `generate` method
     results = (
@@ -225,3 +273,10 @@ def test_with_attention():
     assert_allclose(weights_vals.sum(), 120.0, rtol=1e-5)
     assert_allclose(glimpses_vals.sum(), 199.2402, rtol=1e-5)
     assert_allclose(outputs_vals.sum(), -11.6008, rtol=1e-5)
+
+
+def test_softmax_emitter_initial_outputs():
+    emitter = SoftmaxEmitter(3)
+    emitter.readout_dim = 0
+    assert_equal(emitter.initial_outputs(2).eval(),
+                 3 * numpy.ones((2,), dtype='int64'))

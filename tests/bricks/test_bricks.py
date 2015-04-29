@@ -5,8 +5,8 @@ from numpy.testing import assert_allclose, assert_raises
 from theano import tensor
 
 from blocks.bricks import (Identity, Linear, Maxout, LinearMaxout, MLP, Tanh,
-                           Sequence)
-from blocks.bricks.base import Application, application, Brick, lazy
+                           Sequence, Random)
+from blocks.bricks.base import application, Brick, lazy, NoneAllocation
 from blocks.bricks.parallel import Parallel, Fork
 from blocks.filter import get_application_call, get_brick
 from blocks.initialization import Constant
@@ -14,7 +14,7 @@ from blocks.utils import shared_floatx
 
 
 class TestBrick(Brick):
-    @lazy
+    @lazy(allocation=['config'])
     def __init__(self, config, **kwargs):
         super(TestBrick, self).__init__(**kwargs)
         self.config = config
@@ -53,7 +53,7 @@ class ParentBrick(Brick):
         super(ParentBrick, self).__init__(**kwargs)
         self.child = child
         if child is None:
-            child = TestBrick()
+            child = TestBrick(0)
         self.children = [child]
 
     @application
@@ -114,19 +114,17 @@ def test_repr():
 
 
 def test_lazy():
-    Brick.lazy = False
-    assert_raises(TypeError, TestBrick)
-    Brick.lazy = True
-
+    linear = Linear()
+    assert linear.allocation_args == ['input_dim', 'output_dim']
     brick = TestBrick()
-    assert brick.config is None
+    assert brick.config is NoneAllocation
     brick = TestBrick(config='config')
     assert brick.config == 'config'
     assert_raises(ValueError, TestBrick, 'config', config='config')
 
 
 def test_allocate():
-    brick = TestBrick()
+    brick = TestBrick(0)
     brick.allocate()
     assert brick.allocated
     assert brick.allocation_config_pushed
@@ -150,16 +148,14 @@ def test_allocate():
     assert not broken_parent_brick.allocation_config_pushed
     assert not broken_parent_brick.allocated
 
-    Brick.lazy = False
     broken_parent_brick = ParentBrick(BrokenAllocateBrick())
     assert_raises(AttributeError, broken_parent_brick.allocate)
     assert not broken_parent_brick.allocation_config_pushed
     assert not broken_parent_brick.allocated
-    Brick.lazy = True
 
 
 def test_initialize():
-    brick = TestBrick()
+    brick = TestBrick(0)
     brick.initialize()
 
     parent_brick = ParentBrick()
@@ -168,21 +164,20 @@ def test_initialize():
     broken_parent_brick = ParentBrick(BrokenInitializeBrick())
     assert_raises(AttributeError, broken_parent_brick.initialize)
 
-    Brick.lazy = False
     broken_parent_brick = ParentBrick(BrokenInitializeBrick())
     assert_raises(AttributeError, broken_parent_brick.initialize)
-    Brick.lazy = True
 
 
 def test_tagging():
-    brick = TestBrick()
+    brick = TestBrick(0)
     x = tensor.vector('x')
     y = tensor.vector('y')
     z = tensor.vector('z')
 
     def check_output_variable(o):
-        assert get_application_call(o).brick is brick
-        assert get_application_call(o.owner.inputs[0]).brick is brick
+        assert get_application_call(o).application.brick is brick
+        assert (get_application_call(o.owner.inputs[0]).application.brick
+                is brick)
 
     # Case 1: both positional arguments are provided.
     u, v = brick.apply(x, y)
@@ -253,18 +248,9 @@ def test_application():
     assert test_brick.delegated_apply.inputs == ['x']
     assert TestBrick.delegated_apply.inputs == ['w']
 
-    Brick.lazy = False
-    brick = TestBrick('config')
-    x = tensor.vector()
-    brick.apply(x)
-    assert brick.initialized
-
-    assert_raises(AttributeError, getattr, Application(lambda x: x), 'brick')
-    Brick.lazy = True
-
 
 def test_apply():
-    brick = TestBrick()
+    brick = TestBrick(0)
     assert TestBrick.apply(brick, [0]) == [0, 1]
     if six.PY2:
         assert_raises(TypeError, TestBrick.apply, [0])
@@ -278,6 +264,13 @@ def test_rng():
     linear = Linear()
     linear2 = Linear()
     assert linear.seed != linear2.seed
+
+
+def test_random_brick():
+    random = Random()
+    # This makes sure that a Random brick doesn't instantiate more than one
+    # Theano RNG during its lifetime (see PR #485 on Github)
+    assert random.theano_rng is random.theano_rng
 
 
 def test_linear():
@@ -402,9 +395,8 @@ def test_sequence_variable_outputs():
                       biases_init=Constant(1))
 
     fork = Fork(input_dim=8, output_names=['linear_2_1', 'linear_2_2'],
-                output_dims=dict(linear_2_1=4, linear_2_2=5),
-                prototype=Linear(), weights_init=Constant(3),
-                biases_init=Constant(4))
+                output_dims=[4, 5], prototype=Linear(),
+                weights_init=Constant(3), biases_init=Constant(4))
     sequence = Sequence([linear_1.apply, fork.apply])
     sequence.initialize()
     y_1, y_2 = sequence.apply(x)
@@ -423,13 +415,11 @@ def test_sequence_variable_inputs():
     x, y = tensor.matrix(), tensor.matrix()
 
     parallel_1 = Parallel(input_names=['input_1', 'input_2'],
-                          input_dims=dict(input_1=4, input_2=5),
-                          output_dims=dict(input_1=3, input_2=2),
+                          input_dims=[4, 5], output_dims=[3, 2],
                           prototype=Linear(), weights_init=Constant(2),
                           biases_init=Constant(1))
     parallel_2 = Parallel(input_names=['input_1', 'input_2'],
-                          input_dims=dict(input_1=3, input_2=2),
-                          output_dims=dict(input_1=5, input_2=4),
+                          input_dims=[3, 2], output_dims=[5, 4],
                           prototype=Linear(), weights_init=Constant(2),
                           biases_init=Constant(1))
     sequence = Sequence([parallel_1.apply, parallel_2.apply])
@@ -449,7 +439,7 @@ def test_sequence_variable_inputs():
 
 def test_application_call():
     X = tensor.matrix('X')
-    brick = TestBrick()
+    brick = TestBrick(0)
     Y = brick.access_application_call(X)
     (auxiliary_variable,) = get_application_call(Y).auxiliary_variables
     assert auxiliary_variable.name == 'test_val'

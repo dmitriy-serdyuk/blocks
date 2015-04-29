@@ -5,10 +5,10 @@ import theano
 from numpy.testing import assert_allclose, assert_raises
 from theano import tensor
 
-from blocks.algorithms import (GradientDescent, StepClipping, CompositeRule,
-                               Scale, StepRule, BasicMomentum, Momentum,
-                               AdaDelta, BasicRMSProp, RMSProp, Adam,
-                               RemoveNotFinite)
+from blocks.algorithms import (GradientDescent, StepClipping, VariableClipping,
+                               CompositeRule, Scale, StepRule, BasicMomentum,
+                               Momentum, AdaDelta, BasicRMSProp, RMSProp, Adam,
+                               RemoveNotFinite, Restrict)
 from blocks.utils import shared_floatx
 
 
@@ -136,6 +136,58 @@ def test_step_clipping():
     assert_allclose(clipped2[1].eval(), 4.0)
 
 
+def test_variable_clipping():
+    # Test simple variable clipping with no axis.
+    rule1 = VariableClipping(5)
+
+    gradients = OrderedDict([(shared_floatx([1, 1]), shared_floatx([3, 2])),
+                             (shared_floatx([-1, -1, -1]),
+                              shared_floatx([[3, 9, 2]])),
+                             (shared_floatx([[[1], [-1], [1], [-1]]]),
+                              shared_floatx([[[1], [2], [3], [2]]]))])
+    steps, _ = rule1.compute_steps(gradients)
+    border, clipped, notclipped = steps.items()
+    assert_allclose(border[1].eval(), [3, 2])
+    assert_allclose(clipped[1].eval(),
+                    numpy.array([[0.78885438, 3.47213595, 0.34164079]]),
+                    rtol=1e-5)
+    assert_allclose(notclipped[1].eval(), [[[1], [2], [3], [2]]])
+
+    # Test variable clipping on one axis.
+    rule2 = VariableClipping(10, axis=1)
+    gradients = {shared_floatx([[1, -1, 1, -1], [-1, 1, -1, 1]]):
+                 shared_floatx([[1, 2, 3, 4], [5, 6, 7, 8]])}
+    steps, _ = rule2.compute_steps(gradients)
+    clipped, = steps.items()
+    assert_allclose(clipped[1].eval(),
+                    [[1, 2, 3, 4],
+                     [3.54858826, 4.79049022, 5.06478435, 6.30668631]],
+                    rtol=1e-5)
+
+    # Test variable clipping on two axis.
+    rule3 = VariableClipping(10, axis=(1, 2))
+    gradients = {shared_floatx([[[[1], [-1]],
+                                 [[-1], [1]]],
+                                [[[-1], [1]],
+                                 [[2], [-1]]]]):
+                 shared_floatx([[[[1], [2]],
+                                 [[3], [4]]],
+                                [[[5], [6]],
+                                 [[7], [8]]]])}
+    steps, _ = rule3.compute_steps(gradients)
+    clipped, = steps.items()
+    assert_allclose(clipped[1].eval(),
+                    [[[[1], [2]],
+                      [[3], [4]]],
+                     [[[3.6429394], [4.86911616]],
+                      [[5.86911616], [5.96440909]]]],
+                    rtol=1e-5)
+
+    # Test exceptions.
+    assert_raises(ValueError, rule3.compute_steps, {0: shared_floatx([1.0])})
+    assert_raises(ValueError, VariableClipping, 50, axis=(0, 0))
+
+
 def test_composite_rule():
     rule = CompositeRule([StepClipping(4), Scale(0.1)])
     gradients = {0: shared_floatx(3.0), 1: shared_floatx(4.0)}
@@ -162,9 +214,12 @@ def test_adam():
         OrderedDict([(a, tensor.grad(cost, a))]))
     f = theano.function([], [steps[a]], updates=updates)
 
-    assert_allclose(f()[0], [0.0002, 0.0002], rtol=1e-5)
-    assert_allclose(f()[0], [0.00105263, 0.00105263], rtol=1e-5)
-    assert_allclose(f()[0], [0.00073801, 0.00073801], rtol=1e-5)
+    rtol = 1e-4
+    assert_allclose(f()[0], [0.002, 0.002], rtol=rtol)
+    a.set_value([2, 3])
+    assert_allclose(f()[0], [0.0019407, 0.00196515], rtol=rtol)
+    a.set_value([1, 1.5])
+    assert_allclose(f()[0], [0.00178724, 0.0018223], rtol=rtol)
 
 
 def test_remove_not_finite():
@@ -178,3 +233,33 @@ def test_remove_not_finite():
     rval2, _ = rule2.compute_steps(gradients)
     assert_allclose(rval2[1].eval(), 1.0)
     assert_allclose(rval2[2].eval(), 2.0)
+
+
+class DummyUpdatesStepRule(StepRule):
+    def compute_step(self, param, previous_step):
+        return previous_step + 2, [(param * 10, param * 100)]
+
+
+def test_restrict():
+    rule1 = Scale(0.1)
+    rule2 = Restrict(rule1, (1, 4))
+    rval, _ = rule2.compute_steps(OrderedDict((i, shared_floatx(i * i))
+                                              for i in range(6)))
+    assert_allclose(rval[0].eval(), 0.0)
+    assert_allclose(rval[1].eval(), 0.1)
+    assert_allclose(rval[2].eval(), 4.0)
+    assert_allclose(rval[3].eval(), 9.0)
+    assert_allclose(rval[4].eval(), 1.6)
+    assert_allclose(rval[5].eval(), 25.0)
+
+    steps, updates = Restrict(DummyUpdatesStepRule(), (1, 4)).compute_steps(
+        OrderedDict((i, shared_floatx(i * i)) for i in range(6)))
+
+    assert_allclose(steps[0].eval(), 0.0)
+    assert_allclose(steps[1].eval(), 3.0)
+    assert_allclose(steps[2].eval(), 4.0)
+    assert_allclose(steps[3].eval(), 9.0)
+    assert_allclose(steps[4].eval(), 18.0)
+    assert_allclose(steps[5].eval(), 25.0)
+
+    assert updates == [(10, 100), (40, 400)]

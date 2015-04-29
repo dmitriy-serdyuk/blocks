@@ -6,10 +6,11 @@ from six import add_metaclass
 from theano import tensor
 from theano.sandbox.rng_mrg import MRG_RandomStreams
 from toolz import interleave
+from picklable_itertools.extras import equizip
 
 from blocks import config
 from blocks.bricks.base import application, _Brick, Brick, lazy
-from blocks.roles import add_role, WEIGHTS, BIASES
+from blocks.roles import add_role, WEIGHT, BIAS
 from blocks.utils import pack, shared_floatx_nans
 
 logger = logging.getLogger(__name__)
@@ -20,8 +21,9 @@ class Random(Brick):
 
     Parameters
     ----------
-    theano_rng : object
-        A ``MRG_RandomStreams`` instance.
+    theano_seed : int or list, optional
+        Seed to use for a
+        :class:`~theano.sandbox.rng_mrg.MRG_RandomStreams` object.
 
     """
     seed_rng = numpy.random.RandomState(config.default_seed)
@@ -52,10 +54,9 @@ class Random(Brick):
         The default seed can be set through ``blocks.config``.
 
         """
-        if getattr(self, '_theano_rng', None) is not None:
-            return self._theano_rng
-        else:
-            return MRG_RandomStreams(self.theano_seed)
+        if not hasattr(self, '_theano_rng'):
+            self._theano_rng = MRG_RandomStreams(self.theano_seed)
+        return self._theano_rng
 
     @theano_rng.setter
     def theano_rng(self, theano_rng):
@@ -99,8 +100,8 @@ class Initializable(Brick):
     has_biases = True
     seed_rng = numpy.random.RandomState(config.default_seed)
 
-    @lazy
-    def __init__(self, weights_init, biases_init=None, use_bias=True,
+    @lazy()
+    def __init__(self, weights_init=None, biases_init=None, use_bias=True,
                  seed=None, **kwargs):
         super(Initializable, self).__init__(**kwargs)
         self.weights_init = weights_init
@@ -200,7 +201,7 @@ class Linear(Initializable, Feedforward):
     .. math:: f(\mathbf{x}) = \mathbf{W}\mathbf{x} + \mathbf{b}
 
     """
-    @lazy
+    @lazy(allocation=['input_dim', 'output_dim'])
     def __init__(self, input_dim, output_dim, **kwargs):
         super(Linear, self).__init__(**kwargs)
         self.input_dim = input_dim
@@ -216,12 +217,12 @@ class Linear(Initializable, Feedforward):
 
     def _allocate(self):
         W = shared_floatx_nans((self.input_dim, self.output_dim), name='W')
-        add_role(W, WEIGHTS)
+        add_role(W, WEIGHT)
         self.params.append(W)
         self.add_auxiliary_variable(W.norm(2), name='W_norm')
         if self.use_bias:
             b = shared_floatx_nans((self.output_dim,), name='b')
-            add_role(b, BIASES)
+            add_role(b, BIAS)
             self.params.append(b)
             self.add_auxiliary_variable(b.norm(2), name='b_norm')
 
@@ -265,6 +266,54 @@ class Linear(Initializable, Feedforward):
         super(Linear, self).get_dim(name)
 
 
+class Bias(Feedforward, Initializable):
+    """Add a bias (i.e. sum with a vector)."""
+    @lazy(allocation=['dim'])
+    def __init__(self, dim, **kwargs):
+        super(Bias, self).__init__(**kwargs)
+        self.dim = dim
+
+    def _allocate(self):
+        b = shared_floatx_nans((self.output_dim,), name='b')
+        add_role(b, BIAS)
+        self.params.append(b)
+
+    def _initialize(self):
+        b, = self.params
+        self.biases_init.initialize(b, self.rng)
+
+    @application(inputs=['input_'], outputs=['output'])
+    def apply(self, input_):
+        """Apply the linear transformation.
+
+        Parameters
+        ----------
+        input_ : :class:`~tensor.TensorVariable`
+            The input on which to apply the transformation
+
+        Returns
+        -------
+        output : :class:`~tensor.TensorVariable`
+            The transformed input plus optional bias
+
+        """
+        b, = self.params
+        return input_ + b
+
+    def get_dim(self, name):
+        if name in ['input_', 'output']:
+            return self.dim
+        super(Linear, self).get_dim(name)
+
+    def _get_dim(self):
+        return self.dim
+
+    def _set_dim(self, value):
+        self.dim = value
+
+    input_dim = output_dim = property(_get_dim, _set_dim)
+
+
 class Maxout(Brick):
     """Maxout pooling transformation.
 
@@ -286,7 +335,7 @@ class Maxout(Brick):
     for each output dimension the result with the highest value.
 
     """
-    @lazy
+    @lazy(allocation=['num_pieces'])
     def __init__(self, num_pieces, **kwargs):
         super(Maxout, self).__init__(**kwargs)
         self.num_pieces = num_pieces
@@ -315,7 +364,7 @@ class Maxout(Brick):
         return output
 
 
-class LinearMaxout(Initializable):
+class LinearMaxout(Initializable, Feedforward):
     """Maxout pooling following a linear transformation.
 
     This code combines the :class:`Linear` brick with a :class:`Maxout`
@@ -335,24 +384,30 @@ class LinearMaxout(Initializable):
     -----
     See :class:`Initializable` for initialization parameters.
 
-    .. todo:: Name of :attr:`linear_transformation` shouldn't be hardcoded.
-
     """
-    @lazy
+    @lazy(allocation=['input_dim', 'output_dim', 'num_pieces'])
     def __init__(self, input_dim, output_dim, num_pieces, **kwargs):
         super(LinearMaxout, self).__init__(**kwargs)
+        self.linear = Linear()
+        self.maxout = Maxout()
+        self.children = [self.linear,
+                         self.maxout]
+
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.num_pieces = num_pieces
 
-        self.linear_transformation = Linear(
-            name=self.name + '_linear_to_maxout', input_dim=input_dim,
-            output_dim=output_dim * num_pieces, weights_init=self.weights_init,
-            biases_init=self.biases_init, use_bias=self.use_bias)
-        self.maxout_transformation = Maxout(name=self.name + '_maxout',
-                                            num_pieces=num_pieces)
-        self.children = [self.linear_transformation,
-                         self.maxout_transformation]
+    @property
+    def input_dim(self):
+        return self.linear.input_dim
+
+    @input_dim.setter
+    def input_dim(self, value):
+        self.linear.input_dim = value
+
+    def _push_allocation_config(self):
+        self.linear.output_dim = self.output_dim * self.num_pieces
+        self.maxout.num_pieces = self.num_pieces
 
     @application(inputs=['input_'], outputs=['output'])
     def apply(self, input_):
@@ -369,8 +424,8 @@ class LinearMaxout(Initializable):
             The transformed input
 
         """
-        pre_activation = self.linear_transformation.apply(input_)
-        output = self.maxout_transformation.apply(pre_activation)
+        pre_activation = self.linear.apply(input_)
+        output = self.maxout.apply(pre_activation)
         return output
 
 
@@ -455,7 +510,8 @@ class Softmax(Activation):
             axis represents one distribution. In the vector case, each
             element represents the position of the '1' in a one hot-vector.
         x : :class:`~tensor.TensorVariable`
-            Each slice along axis represents one distribution.
+            Each slice along axis represents energies of a distribution,
+            that is pre-softmax values.
 
         Returns
         -------
@@ -485,7 +541,8 @@ class Sequence(Brick):
 
     Parameters
     ----------
-    application_methods : list of :class:`.BoundApplication` to apply
+    application_methods : list
+        List of :class:`.BoundApplication` to apply
 
     """
     def __init__(self, application_methods, **kwargs):
@@ -513,6 +570,33 @@ class Sequence(Brick):
         return self.application_methods[-1].outputs
 
 
+class FeedforwardSequence(Sequence, Feedforward):
+    """A sequence where the first and last bricks are feedforward.
+
+    Parameters
+    ----------
+    application_methods : list
+        List of :class:`.BoundApplication` to apply. The first and last
+        application method should belong to a :class:`Feedforward` brick.
+
+    """
+    @property
+    def input_dim(self):
+        return self.children[0].input_dim
+
+    @input_dim.setter
+    def input_dim(self, value):
+        self.children[0].input_dim = value
+
+    @property
+    def output_dim(self):
+        return self.children[-1].output_dim
+
+    @output_dim.setter
+    def output_dim(self, value):
+        self.children[-1].output_dim = value
+
+
 class MLP(Sequence, Initializable, Feedforward):
     """A simple multi-layer perceptron.
 
@@ -538,7 +622,6 @@ class MLP(Sequence, Initializable, Feedforward):
     configuration to the child layers manually before initialization.
 
     >>> from blocks.initialization import IsotropicGaussian, Constant
-    >>> Brick.lazy = True
     >>> mlp = MLP(activations=[Tanh(), None], dims=[30, 20, 10],
     ...           weights_init=IsotropicGaussian(),
     ...           biases_init=Constant(1))
@@ -547,7 +630,7 @@ class MLP(Sequence, Initializable, Feedforward):
     >>> mlp.initialize()
 
     """
-    @lazy
+    @lazy(allocation=['dims'])
     def __init__(self, activations, dims, **kwargs):
         self.activations = activations
 
@@ -586,8 +669,9 @@ class MLP(Sequence, Initializable, Feedforward):
     def _push_allocation_config(self):
         if not len(self.dims) - 1 == len(self.linear_transformations):
             raise ValueError
-        for input_dim, output_dim, layer in zip(self.dims[:-1], self.dims[1:],
-                                                self.linear_transformations):
+        for input_dim, output_dim, layer in \
+                equizip(self.dims[:-1], self.dims[1:],
+                        self.linear_transformations):
             layer.input_dim = input_dim
             layer.output_dim = output_dim
             layer.use_bias = self.use_bias

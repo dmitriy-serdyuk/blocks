@@ -8,6 +8,7 @@ import operator
 
 import theano
 from six.moves import input
+from picklable_itertools.extras import equizip
 from theano import tensor
 
 from blocks.bricks import Tanh, Initializable
@@ -17,7 +18,7 @@ from blocks.bricks.recurrent import SimpleRecurrent, Bidirectional
 from blocks.bricks.attention import SequenceContentAttention
 from blocks.bricks.parallel import Fork
 from blocks.bricks.sequence_generators import (
-    SequenceGenerator, LinearReadout, SoftmaxEmitter, LookupFeedback)
+    SequenceGenerator, Readout, SoftmaxEmitter, LookupFeedback)
 from blocks.config_parser import config
 from blocks.graph import ComputationGraph
 from fuel.transformers import Mapping, Batch, Padding, Filter
@@ -30,7 +31,7 @@ from blocks.initialization import Orthogonal, IsotropicGaussian, Constant
 from blocks.model import Model
 from blocks.monitoring import aggregation
 from blocks.extensions import FinishAfter, Printing, Timing
-from blocks.extensions.saveload import SerializeMainLoop
+from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.plot import Plot
 from blocks.main_loop import MainLoop
@@ -81,7 +82,7 @@ def _filter_long(data):
 
 
 def _is_nan(log):
-    return math.isnan(log.current_row.total_gradient_norm)
+    return math.isnan(log.current_row['total_gradient_norm'])
 
 
 class WordReverser(Initializable):
@@ -98,16 +99,18 @@ class WordReverser(Initializable):
         fork = Fork([name for name in encoder.prototype.apply.sequences
                     if name != 'mask'])
         fork.input_dim = dimension
-        fork.output_dims = {name: dimension for name in fork.input_names}
+        fork.output_dims = [dimension for name in fork.input_names]
         lookup = LookupTable(alphabet_size, dimension)
         transition = SimpleRecurrent(
             activation=Tanh(),
             dim=dimension, name="transition")
         attention = SequenceContentAttention(
             state_names=transition.apply.states,
-            sequence_dim=2 * dimension, match_dim=dimension, name="attention")
-        readout = LinearReadout(
-            readout_dim=alphabet_size, source_names=["states"],
+            attended_dim=2 * dimension, match_dim=dimension, name="attention")
+        readout = Readout(
+            readout_dim=alphabet_size,
+            source_names=[transition.apply.states[0],
+                          attention.take_glimpses.outputs[0]],
             emitter=SoftmaxEmitter(name="emitter"),
             feedback_brick=LookupFeedback(alphabet_size, dimension),
             name="readout")
@@ -123,11 +126,11 @@ class WordReverser(Initializable):
 
     @application
     def cost(self, chars, chars_mask, targets, targets_mask):
-        return self.generator.cost(
+        return self.generator.cost_matrix(
             targets, targets_mask,
             attended=self.encoder.apply(
                 **dict_union(
-                    self.fork.apply(self.lookup.lookup(chars), as_dict=True),
+                    self.fork.apply(self.lookup.apply(chars), as_dict=True),
                     mask=chars_mask)),
             attended_mask=chars_mask)
 
@@ -136,7 +139,7 @@ class WordReverser(Initializable):
         return self.generator.generate(
             n_steps=3 * chars.shape[0], batch_size=chars.shape[1],
             attended=self.encoder.apply(
-                **dict_union(self.fork.apply(self.lookup.lookup(chars),
+                **dict_union(self.fork.apply(self.lookup.apply(chars),
                              as_dict=True))),
             attended_mask=tensor.ones(chars.shape))
 
@@ -152,24 +155,19 @@ def main(mode, save_path, num_batches, data_path=None):
             dataset = TextFile(data_path, **dataset_options)
         else:
             dataset = OneBillionWord("training", [99], **dataset_options)
-        data_stream = Mapping(
-            mapping=_transpose,
-            data_stream=Padding(
-                Batch(
-                    iteration_scheme=ConstantScheme(10),
-                    data_stream=Mapping(
-                        mapping=reverse_words,
-                        add_sources=("targets",),
-                        data_stream=Filter(
-                            predicate=_filter_long,
-                            data_stream=dataset
-                            .get_example_stream())))))
+        data_stream = dataset.get_example_stream()
+        data_stream = Filter(data_stream, _filter_long)
+        data_stream = Mapping(data_stream, reverse_words,
+                              add_sources=("targets",))
+        data_stream = Batch(data_stream, iteration_scheme=ConstantScheme(10))
+        data_stream = Padding(data_stream)
+        data_stream = Mapping(data_stream, _transpose)
 
         # Initialization settings
         reverser.weights_init = IsotropicGaussian(0.1)
         reverser.biases_init = Constant(0.0)
         reverser.push_initialization_config()
-        reverser.encoder.weghts_init = Orthogonal()
+        reverser.encoder.weights_init = Orthogonal()
         reverser.generator.transition.weights_init = Orthogonal()
 
         # Build the cost computation graph
@@ -197,30 +195,28 @@ def main(mode, save_path, num_batches, data_path=None):
         for brick in model.get_top_bricks():
             brick.initialize()
 
-        # Fetch variables useful for debugging
-        max_length = named_copy(chars.shape[0], "max_length")
-        cost_per_character = named_copy(
-            aggregation.mean(batch_cost, batch_size * max_length),
-            "character_log_likelihood")
-        cg = ComputationGraph(cost)
-        r = reverser
-        (energies,) = VariableFilter(
-            application=r.generator.readout.readout,
-            name="output")(cg.variables)
-        min_energy = named_copy(energies.min(), "min_energy")
-        max_energy = named_copy(energies.max(), "max_energy")
-        (activations,) = VariableFilter(
-            application=r.generator.transition.apply,
-            name="states")(cg.variables)
-        mean_activation = named_copy(abs(activations).mean(),
-                                     "mean_activation")
-
         # Define the training algorithm.
+        cg = ComputationGraph(cost)
         algorithm = GradientDescent(
             cost=cost, params=cg.parameters,
             step_rule=CompositeRule([StepClipping(10.0), Scale(0.01)]))
 
-        # More variables for debugging
+        # Fetch variables useful for debugging
+        generator = reverser.generator
+        (energies,) = VariableFilter(
+            applications=[generator.readout.readout],
+            name_regex="output")(cg.variables)
+        (activations,) = VariableFilter(
+            applications=[generator.transition.apply],
+            name=generator.transition.apply.states[0])(cg.variables)
+        max_length = named_copy(chars.shape[0], "max_length")
+        cost_per_character = named_copy(
+            aggregation.mean(batch_cost, batch_size * max_length),
+            "character_log_likelihood")
+        min_energy = named_copy(energies.min(), "min_energy")
+        max_energy = named_copy(energies.max(), "max_energy")
+        mean_activation = named_copy(abs(activations).mean(),
+                                     "mean_activation")
         observables = [
             cost, min_energy, max_energy, mean_activation,
             batch_size, max_length, cost_per_character,
@@ -240,16 +236,20 @@ def main(mode, save_path, num_batches, data_path=None):
             algorithm=algorithm,
             extensions=[
                 Timing(),
-                TrainingDataMonitoring(observables, after_every_batch=True),
+                TrainingDataMonitoring(observables, after_batch=True),
                 average_monitoring,
                 FinishAfter(after_n_batches=num_batches)
+                # This shows a way to handle NaN emerging during
+                # training: simply finish it.
                 .add_condition("after_batch", _is_nan),
                 Plot(os.path.basename(save_path),
                      [[average_monitoring.record_name(cost)],
                       [average_monitoring.record_name(cost_per_character)]],
                      every_n_batches=10),
-                SerializeMainLoop(save_path, every_n_batches=500,
-                                  save_separately=["model", "log"]),
+                # Saving the model and the log separately is convenient,
+                # because loading the whole pickle takes quite some time.
+                Checkpoint(save_path, every_n_batches=500,
+                           save_separately=["model", "log"]),
                 Printing(every_n_batches=1)])
         main_loop.run()
     elif mode == "sample" or mode == "beam_search":
@@ -283,24 +283,21 @@ def main(mode, save_path, num_batches, data_path=None):
                 # a new `BeamSearch` object every time if
                 # speed is important for you.
                 beam_search = BeamSearch(input_.shape[1], samples)
-                outputs, _, costs = beam_search.search(
+                outputs, costs = beam_search.search(
                     {chars: input_}, char2code['</S>'],
                     3 * input_.shape[0])
             else:
                 _1, outputs, _2, _3, costs = (
                     model.get_theano_function()(input_))
-                costs = costs.T
-
-            outputs = list(outputs.T)
-            costs = list(costs)
-            for i in range(len(outputs)):
-                outputs[i] = list(outputs[i])
-                try:
-                    true_length = outputs[i].index(char2code['</S>']) + 1
-                except ValueError:
-                    true_length = len(outputs[i])
-                outputs[i] = outputs[i][:true_length]
-                if mode == "sample":
+                outputs = list(outputs.T)
+                costs = list(costs.T)
+                for i in range(len(outputs)):
+                    outputs[i] = list(outputs[i])
+                    try:
+                        true_length = outputs[i].index(char2code['</S>']) + 1
+                    except ValueError:
+                        true_length = len(outputs[i])
+                    outputs[i] = outputs[i][:true_length]
                     costs[i] = costs[i][:true_length].sum()
             return outputs, costs
 
@@ -322,7 +319,7 @@ def main(mode, save_path, num_batches, data_path=None):
                 numpy.repeat(numpy.array(encoded_input)[:, None],
                              batch_size, axis=1))
             messages = []
-            for sample, cost in zip(samples, costs):
+            for sample, cost in equizip(samples, costs):
                 message = "({})".format(cost)
                 message += "".join(code2char[code] for code in sample)
                 if sample == target:

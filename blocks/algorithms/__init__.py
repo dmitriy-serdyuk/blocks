@@ -3,13 +3,16 @@ import logging
 import itertools
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
+from six.moves import reduce
+
+from picklable_itertools.extras import equizip
 
 import theano
 from six import add_metaclass
 from theano import tensor
 
 from blocks.graph import ComputationGraph
-from blocks.utils import named_copy, shared_floatx
+from blocks.utils import dict_subset, named_copy, pack, shared_floatx
 from blocks.theano_expressions import l2_norm
 
 logger = logging.getLogger(__name__)
@@ -193,8 +196,8 @@ class GradientDescent(DifferentiableCostMinimizer):
         if not self.gradients:
             logger.info("Taking the cost gradient")
             self.gradients = dict(
-                zip(self.params, tensor.grad(self.cost, self.params,
-                                             known_grads=known_grads)))
+                equizip(self.params, tensor.grad(self.cost, self.params,
+                                                 known_grads=known_grads)))
             logger.info("The cost gradient computation graph is built")
         else:
             if known_grads:
@@ -254,7 +257,9 @@ class StepRule(object):
         step : :class:`~theano.Variable`
             Theano variable for the step to take.
         updates : list
-            A list of tuples representing updates to be performed.
+            A list of tuples representing updates to be performed. This
+            is useful for stateful rules such as :class:`Momentum` which
+            need to update shared variables after itetations.
 
         """
         raise NotImplementedError
@@ -287,9 +292,9 @@ class StepRule(object):
         """
         parameter_wise = [self.compute_step(param, previous_steps[param])
                           for param in previous_steps]
-        (steps, updates) = zip(*parameter_wise)
+        steps, updates = equizip(*parameter_wise)
         steps = OrderedDict((param, step) for param, step
-                            in zip(previous_steps.keys(), steps))
+                            in equizip(previous_steps.keys(), steps))
         updates = list(itertools.chain(*updates))
         return steps, updates
 
@@ -388,8 +393,7 @@ class Momentum(CompositeRule):
 
     See Also
     --------
-    :class:`SharedVariableModifier` for a parameter decay during the
-    training.
+    :class:`SharedVariableModifier`
 
     """
     def __init__(self, learning_rate=1.0, momentum=0.):
@@ -406,9 +410,9 @@ class AdaDelta(StepRule):
     Parameters
     ----------
     decay_rate : float, optional
-        Decay rate in [0, 1]. Defaults to 0.
+        Decay rate in [0, 1]. Defaults to 0.95.
     epsilon : float, optional
-        Stabilizing constant for RMS. Defaults to 1e-7.
+        Stabilizing constant for RMS. Defaults to 1e-6.
 
     Notes
     -----
@@ -418,7 +422,7 @@ class AdaDelta(StepRule):
        Rate Method*, arXiv:1212.5701.
 
     """
-    def __init__(self, decay_rate=0., epsilon=1e-7):
+    def __init__(self, decay_rate=0.95, epsilon=1e-6):
         if not 0.0 <= decay_rate <= 1.0:
             raise ValueError("decay rate needs to be in [0, 1]")
         self.decay_rate = shared_floatx(decay_rate)
@@ -524,8 +528,7 @@ class RMSProp(CompositeRule):
 
     See Also
     --------
-    :class:`SharedVariableModifier` for a parameter decay during the
-    training.
+    :class:`SharedVariableModifier`
 
     """
     def __init__(self, learning_rate=1.0, decay_rate=0.9, max_scaling=1e5):
@@ -572,6 +575,80 @@ class StepClipping(StepRule):
         return steps, []
 
 
+class VariableClipping(StepRule):
+    """Clip the maximum norm of individual variables along certain axes.
+
+    This :class:`StepRule` can be used to implement L2 norm constraints on
+    e.g. the weight vectors of individual hidden units, convolutional
+    filters or entire weight tensors. Combine with :class:`Restrict`
+    (and possibly :class:`CompositeRule`), to apply such constraints only
+    to certain variables and/or apply different norm constraints to
+    different variables.
+
+    Parameters
+    ----------
+    threshold : float
+        Maximum norm for a given (portion of a) tensor.
+    axis : int or iterable, optional
+        An integer single axis, or an iterable collection of integer
+        axes over which to sum in order to calculate the L2 norm. If
+        `None` (the default), the norm is computed over all elements
+        of the tensor.
+
+    Notes
+    -----
+    Because of the way the :class:`StepRule` API works, this particular
+    rule implements norm clipping of the value *after* update in the
+    following way: it computes ``param - previous_step``, scales it
+    to have (possibly axes-wise) norm(s) of at most `threshold`,
+    then subtracts *that* value from `param` to yield an 'equivalent
+    step' that respects the desired norm constraints. This procedure
+    implicitly assumes one is doing simple (stochastic) gradient descent,
+    and so steps computed by this step rule may not make sense for use
+    in other contexts.
+
+    Investigations into max-norm regularization date from [Srebro2005]_.
+    The first appearance of this technique as a regularization method
+    for the weight vectors of individual hidden units in feed-forward
+    neural networks may be [Hinton2012]_.
+
+    .. [Srebro2005] Nathan Srebro and Adi Shraibman.
+       "Rank, Trace-Norm and Max-Norm". *18th Annual Conference
+       on Learning Theory (COLT)*, June 2005.
+
+    .. [Hinton2012] Geoffrey E. Hinton, Nitish Srivastava,
+       Alex Krizhevsky, Ilya Sutskever, Ruslan R. Salakhutdinov.
+       "Improving neural networks by preventing co-adaptation of
+       feature detectors". arXiv:1207.0580.
+
+    """
+    def __init__(self, threshold, axis=None):
+        axis = pack(axis) if axis is not None else ()
+        self.axis = set(axis)
+        self.threshold = shared_floatx(threshold)
+        if len(axis) != len(self.axis):
+            raise ValueError("axis must be unique")
+
+    def compute_step(self, param, previous_step):
+        if any(ax >= previous_step.ndim for ax in self.axis):
+            raise ValueError("Invalid axis {} for {}, ndim={}".format(
+                self.axis, param, previous_step.ndim))
+        if len(self.axis) == 0:
+            norms = l2_norm([param - previous_step])
+        else:
+            squares = tensor.sqr(param - previous_step)
+            norms = tensor.sqrt(
+                reduce(lambda t, a: t.sum(axis=a, keepdims=True),
+                       sorted(self.axis), squares))
+        # We want a step s* that is the same as scaling (param - previous_step)
+        # by threshold / norm when threshold < norm.
+        shrinking_step = (param -
+                          (self.threshold / norms) * (param - previous_step))
+        return tensor.switch(norms > self.threshold,
+                             shrinking_step,
+                             previous_step), ()
+
+
 class Adam(StepRule):
     """Adam optimizer as described in [King2014]_.
 
@@ -584,21 +661,21 @@ class Adam(StepRule):
     learning_rate : float, optional
         Step size.
         Default value is set to 0.0002.
-    beta_1 : float, optional
+    beta1 : float, optional
         Exponential decay rate for the first moment estimates.
         Default value is set to 0.1.
-    beta_2 : float, optional
+    beta2 : float, optional
         Exponential decay rate for the second moment estimates.
         Default value is set to 0.001.
     epsilon : float, optional
         Default value is set to 1e-8.
     decay_factor : float, optional
-        Default value is set to 1e-8.
+        Default value is set to 1 - 1e-8.
 
     """
-    def __init__(self, learning_rate=0.0002,
+    def __init__(self, learning_rate=0.002,
                  beta1=0.1, beta2=0.001, epsilon=1e-8,
-                 decay_factor=1e-8):
+                 decay_factor=(1 - 1e-8)):
         self.learning_rate = learning_rate
         self.beta1 = beta1
         self.beta2 = beta2
@@ -657,3 +734,35 @@ class RemoveNotFinite(StepRule):
         step = tensor.switch(not_finite, self.scaler * param, previous_step)
 
         return step, []
+
+
+class Restrict(StepRule):
+    """Applies a given :class:`StepRule` only to certain variables.
+
+    Example applications include clipping steps on only certain parameters,
+    or scaling a certain kind of parameter's updates (e.g. adding an
+    additional scalar multiplier to the steps taken on convolutional
+    filters).
+
+    Parameters
+    ----------
+    step_rule : :class:`StepRule`
+        The :class:`StepRule` to be applied on the given variables.
+    variables : iterable
+        A collection of Theano variables on which to apply `step_rule`.
+        Variables not appearing in this collection will not have
+        `step_rule` applied to them.
+
+    """
+    def __init__(self, step_rule, variables):
+        self.step_rule = step_rule
+        self.variables = frozenset(variables)
+
+    def compute_steps(self, previous_steps):
+        filtered_previous_steps = dict_subset(previous_steps, self.variables)
+        steps, updates = self.step_rule.compute_steps(filtered_previous_steps)
+        actual = OrderedDict((param, steps[param])
+                             if param in steps
+                             else (param, previous_steps[param])
+                             for param in previous_steps)
+        return actual, updates

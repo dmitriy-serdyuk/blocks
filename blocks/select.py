@@ -2,12 +2,19 @@ import logging
 import re
 from collections import OrderedDict
 
+from picklable_itertools.extras import equizip
 import six
 
 from blocks.bricks.base import Brick
 from blocks.utils import dict_union
 
 logger = logging.getLogger(__name__)
+
+name_collision_error_message = """
+
+The '{}' name appears more than once. Make sure that all bricks' children \
+have different names and that user-defined shared variables have unique names.
+"""
 
 
 class Path(object):
@@ -80,7 +87,7 @@ class Path(object):
             raise ValueError
 
         nodes = []
-        for separator, part in zip(separators, parts):
+        for separator, part in equizip(separators, parts):
             if separator == Path.separator:
                 nodes.append(Path.BrickName(part))
             elif Path.param_separator == Path.param_separator:
@@ -176,6 +183,11 @@ class Selector(object):
             for child in brick.children:
                 for path, param in recursion(child).items():
                     new_path = Path([Path.BrickName(brick.name)]) + path
+                    if new_path in result:
+                        raise ValueError(
+                            "Name collision encountered while retrieving " +
+                            "parameters." +
+                            name_collision_error_message.format(new_path))
                     result[new_path] = param
             return result
         result = dict_union(*[recursion(brick)
