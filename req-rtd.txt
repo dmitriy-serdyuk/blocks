@@ -6,6 +6,9 @@ git+https://github.com/dwf/picklable_itertools.git#egg=picklable-itertools
 --allow-unverified theano
 git+https://github.com/Theano/Theano.git#egg=theano
 
+six==1.9.0
+progressbar2==2.7.3
+PyYaml==3.11
 mock
 toolz
 
