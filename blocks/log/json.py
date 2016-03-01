@@ -3,10 +3,18 @@ from mimir import Logger
 from .log import TrainingLogBase
 
 
-class PiclableLogger(object):
+class PicklableLogger(object):
+    """A picklable wrapper around mimir logger.
+
+    This class is a picklable version of `:class:mimir.Logger` with
+    some additional functionality. The current status is saved in
+    `iteration_status` attribute and is flushed to the file only if
+    the next iteration is requested or the class is pickled.
+
+    """
     def __init__(self, filename, **kwargs):
         logger = Logger(**kwargs)
-        self.__dict__ = logger.__dict__
+        self.__dict__.update(logger.__dict__)
         self.all_kwargs = kwargs
         self.all_kwargs['filename'] = filename
         self.status = {}
@@ -14,7 +22,7 @@ class PiclableLogger(object):
 
     def __setstate__(self, state):
         logger = Logger(**state)
-        self.__dict__ = logger.__dict__
+        self.__dict__.update(logger.__dict__)
 
     def __getstate__(self):
         self.flush()
@@ -39,7 +47,7 @@ class PiclableLogger(object):
 
 class JSONLog(TrainingLogBase):
     def __init__(self, filename='test.jsonl.gz'):
-        self.logger = PiclableLogger(maxlen=2, filename=filename)
+        self.logger = PicklableLogger(maxlen=2, filename=filename)
         TrainingLogBase.__init__(self)
 
     @property
