@@ -13,7 +13,7 @@ class PiclableLogger(object):
         self.iteration_status = {}
 
     def __setstate__(self, state):
-        logger = Logger(**kwargs)
+        logger = Logger(**state)
         self.__dict__ = logger.__dict__
 
     def __getstate__(self):
