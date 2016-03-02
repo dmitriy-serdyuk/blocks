@@ -1,9 +1,9 @@
 from .log import TrainingLog
 from .sqlite import SQLiteLog
-from .json import JSONLog
+from .json import JSONLinesLog
 
 BACKENDS = {
     'python': TrainingLog,
     'sqlite': SQLiteLog,
-    'mimir': JSONLog
+    'mimir': JSONLinesLog
 }

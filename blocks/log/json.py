@@ -29,13 +29,14 @@ class PicklableLogger(_Logger):
     def __setstate__(self, state):
         logger = Logger(**state)
         logger.load(state['filename'])
+        self.logger_kwargs = state
         self.__dict__.update(logger.__dict__)
 
     def __getstate__(self):
         return self.logger_kwargs
 
 
-class JSONLog(TrainingLogBase):
+class JSONLinesLog(TrainingLogBase):
     """JSON Lines log.
 
     The current status is saved in
@@ -46,8 +47,9 @@ class JSONLog(TrainingLogBase):
     def __init__(self, filename='log.jsonl.gz', **kwargs):
         self.status = {}
         TrainingLogBase.__init__(self)
-        self.logger = PicklableLogger(maxlen=2, filename=filename,
-                                      default=pretty_serialize_numpy, **kwargs)
+        self.logger = PicklableLogger(
+            maxlen=2, filename=filename, default=pretty_serialize_numpy,
+            formatter=None, **kwargs)
         self.last_flushed = -1
         self.iteration_status = {}
 
