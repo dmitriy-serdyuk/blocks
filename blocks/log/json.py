@@ -1,9 +1,10 @@
 from mimir import Logger
+from mimir.logger import _Logger
 
 from .log import TrainingLogBase
 
 
-class PicklableLogger(object):
+class PicklableLogger(_Logger):
     """A picklable wrapper around mimir logger.
 
     This class is a picklable version of `:class:mimir.Logger` with
@@ -13,7 +14,7 @@ class PicklableLogger(object):
 
     """
     def __init__(self, filename, **kwargs):
-        logger = Logger(**kwargs)
+        logger = Logger(filename, **kwargs)
         self.__dict__.update(logger.__dict__)
         self.all_kwargs = kwargs
         self.all_kwargs['filename'] = filename
