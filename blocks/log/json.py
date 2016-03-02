@@ -76,3 +76,6 @@ class JSONLinesLog(TrainingLogBase):
 
     def __setitem__(self, time, value):
         raise ValueError('cannot manually change log')
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.logger.close()

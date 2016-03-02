@@ -157,7 +157,7 @@ class MainLoop(object):
                     set(self.algorithm.parameters)):
                 logger.warning("different parameters for model and algorithm")
 
-        with change_recursion_limit(config.recursion_limit):
+        with change_recursion_limit(config.recursion_limit), self.log:
             self.original_sigint_handler = signal.signal(
                 signal.SIGINT, self._handle_epoch_interrupt)
             self.original_sigterm_handler = signal.signal(
