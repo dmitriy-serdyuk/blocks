@@ -28,6 +28,7 @@ class PicklableLogger(_Logger):
 
     def __setstate__(self, state):
         logger = Logger(**state)
+        logger.load(state['filename'])
         self.__dict__.update(logger.__dict__)
 
     def __getstate__(self):
