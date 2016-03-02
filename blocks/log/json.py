@@ -22,9 +22,13 @@ class PicklableLogger(_Logger):
 
     """
     def __init__(self, **kwargs):
-        logger = Logger(**kwargs)
-        self.__dict__.update(logger.__dict__)
         self.logger_kwargs = kwargs
+        self.open()
+
+    def open(self):
+        logger = Logger(**self.logger_kwargs)
+        self.__dict__.update(logger.__dict__)
+        self.load(self.logger_kwargs['filename'])
 
     def __setstate__(self, state):
         logger = Logger(**state)
@@ -76,6 +80,9 @@ class JSONLinesLog(TrainingLogBase):
 
     def __setitem__(self, time, value):
         raise ValueError('cannot manually change log')
+
+    def __enter__(self):
+        self.logger.open()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.logger.close()
