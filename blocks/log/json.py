@@ -20,6 +20,7 @@ class PicklableLogger(_Logger):
         self.all_kwargs['filename'] = filename
         self.status = {}
         self.iteration_status = {}
+        self.last_flushed = -1
 
     def __setstate__(self, state):
         logger = Logger(**state)
@@ -30,12 +31,14 @@ class PicklableLogger(_Logger):
         return self.all_kwargs
 
     def flush(self):
-        self.log({self.status['iterations_done']: self.iteration_status})
+        iterations_done = self.status['iterations_done']
+        self.log({iterations_done: self.iteration_status})
         self.iteration_status = {}
+        self.last_flushed = iterations_done
 
     def get_record(self, time):
         iterations_done = self.status.get('iterations_done', -1)
-        if time > iterations_done:
+        if time > self.last_flushed:
             self.flush()
             return self.iteration_status
         elif time < iterations_done - 1:
