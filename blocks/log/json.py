@@ -1,7 +1,18 @@
+import numpy
 from mimir import Logger
 from mimir.logger import _Logger
+from mimir.serialization import serialize_numpy
 
 from .log import TrainingLogBase
+
+
+def pretty_serialize_numpy(obj):
+    if isinstance(obj, numpy.ndarray):
+        try:
+            return numpy.asscalar(obj)
+        except TypeError:
+            pass
+    return serialize_numpy(obj)
 
 
 class PicklableLogger(_Logger):
@@ -14,7 +25,7 @@ class PicklableLogger(_Logger):
 
     """
     def __init__(self, filename, **kwargs):
-        logger = Logger(filename, **kwargs)
+        logger = Logger(filename, default=pretty_serialize_numpy, **kwargs)
         self.__dict__.update(logger.__dict__)
         self.all_kwargs = kwargs
         self.all_kwargs['filename'] = filename
