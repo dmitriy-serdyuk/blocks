@@ -47,9 +47,11 @@ class JSONLinesLog(TrainingLogBase):
     def __init__(self, filename='log.jsonl.gz', **kwargs):
         self.status = {}
         TrainingLogBase.__init__(self)
-        self.logger = PicklableLogger(
-            maxlen=2, filename=filename, default=pretty_serialize_numpy,
-            formatter=None, **kwargs)
+        kwargs.setdefault("maxlen", 2)
+        kwargs.setdefault("filename", filename)
+        kwargs.setdefault("default", pretty_serialize_numpy)
+        kwargs.setdefault("formatter", None)
+        self.logger = PicklableLogger(**kwargs)
         self.last_flushed = -1
         self.iteration_status = {}
 
