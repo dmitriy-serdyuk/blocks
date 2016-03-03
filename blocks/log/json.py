@@ -1,18 +1,7 @@
-import numpy
 from mimir import Logger
 from mimir.logger import _Logger
-from mimir.serialization import serialize_numpy
 
 from .log import TrainingLogBase
-
-
-def pretty_serialize_numpy(obj):
-    if isinstance(obj, numpy.ndarray):
-        try:
-            return numpy.asscalar(obj)
-        except TypeError:
-            pass
-    return serialize_numpy(obj)
 
 
 class PicklableLogger(_Logger):
@@ -53,7 +42,6 @@ class JSONLinesLog(TrainingLogBase):
         TrainingLogBase.__init__(self)
         kwargs.setdefault("maxlen", 2)
         kwargs.setdefault("filename", filename)
-        kwargs.setdefault("default", pretty_serialize_numpy)
         kwargs.setdefault("formatter", None)
         self.logger = PicklableLogger(**kwargs)
         self.last_flushed = -1
@@ -72,7 +60,12 @@ class JSONLinesLog(TrainingLogBase):
             self.flush()
             return self.iteration_status
         elif time < iterations_done - 1:
-            raise ValueError('cannot get past log entries for JSON log')
+            try:
+                return self.logger[iterations_done - time]
+            except IndexError:
+                raise ValueError(
+                    'cannot get past log entries for JSON log, max log length '
+                    'in memory is: {}'.format(self.logger_kwargs['maxlen']))
         elif time == iterations_done:
             return self.iteration_status
         else:
