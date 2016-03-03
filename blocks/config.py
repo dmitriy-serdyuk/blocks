@@ -48,8 +48,13 @@ The following configurations are supported:
 .. option:: log_backend
 
    The backend to use for logging experiments. Defaults to `python`, which
-   stores the log as a Python object in memory. The other option is
-   `sqlite`.
+   stores the log as a Python object in memory. The other options are
+   `sqlite` and `mimir`.
+
+.. option:: log_arguments
+
+   The arguments to pass to the logger. Defaults to an empty dictionary.
+   This option can be used to configure `:class:~.log.json.JSONLinesLog`.
 
 .. option:: sqlite_database, BLOCKS_SQLITEDB
 
