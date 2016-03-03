@@ -18,7 +18,7 @@ matrix:
     - python: 3.4
       env: TESTS=blocks FLOATX=float64
     - python: 2.7
-      env: TESTS=blocks FLOATX=float32 DB=mimir
+      env: TESTS=blocks FLOATX=float64 DB=mimir
     - python: 2.7
       env: TESTS=blocks-examples FLOATX=float32
     - python: 2.7
