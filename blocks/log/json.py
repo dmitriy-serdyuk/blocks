@@ -66,7 +66,8 @@ class JSONLinesLog(TrainingLogBase):
             except IndexError:
                 raise ValueError(
                     'cannot get past log entries for JSON log, max log length '
-                    'in memory is: {}'.format(self.logger_kwargs['maxlen']))
+                    'in memory is: {}'.format(
+                        self.logger.logger_kwargs['maxlen']))
         elif time == iterations_done:
             return self.iteration_status
         else:
