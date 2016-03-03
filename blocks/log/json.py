@@ -12,17 +12,19 @@ class PicklableLogger(_Logger):
     """
     def __init__(self, **kwargs):
         self.logger_kwargs = kwargs
+        self.opened = False
 
     def open(self):
-        logger = Logger(**self.logger_kwargs)
-        self.__dict__.update(logger.__dict__)
-        self.load(self.logger_kwargs['filename'])
+        if not self.opened:
+            logger = Logger(**self.logger_kwargs)
+            self.__dict__.update(logger.__dict__)
+            self.load(self.logger_kwargs['filename'])
+            self.opened = True
 
     def __setstate__(self, state):
-        logger = Logger(**state)
-        logger.load(state['filename'])
         self.logger_kwargs = state
-        self.__dict__.update(logger.__dict__)
+        self.opened = False
+        self.open()
 
     def __getstate__(self):
         return self.logger_kwargs
