@@ -12,7 +12,6 @@ class PicklableLogger(_Logger):
     """
     def __init__(self, **kwargs):
         self.logger_kwargs = kwargs
-        self.open()
 
     def open(self):
         logger = Logger(**self.logger_kwargs)
