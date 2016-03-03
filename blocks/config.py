@@ -179,6 +179,7 @@ config.add_config('recursion_limit', type_=int, default=10000)
 config.add_config('profile', type_=bool_, default=False,
                   env_var='BLOCKS_PROFILE')
 config.add_config('log_backend', type_=str, default='python')
+config.add_config('log_arguments', type_=dict, default={})
 config.add_config('sqlite_database', type_=str,
                   default=os.path.expanduser('~/blocks_log.sqlite'),
                   env_var='BLOCKS_SQLITEDB')

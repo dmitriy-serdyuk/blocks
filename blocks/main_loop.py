@@ -96,7 +96,7 @@ class MainLoop(object):
         if log is None:
             if log_backend is None:
                 log_backend = config.log_backend
-            log = BACKENDS[log_backend]()
+            log = BACKENDS[log_backend](**config.log_arguments)
         if extensions is None:
             extensions = []
 
