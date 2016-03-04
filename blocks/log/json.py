@@ -52,13 +52,12 @@ class JSONLinesLog(TrainingLogBase):
         zcat log.jsnol.gz | jq '.[].train_error | select(.>0)'
 
     """
-    def __init__(self, filename='log.jsonl.gz', **kwargs):
+    def __init__(self, filename='log.jsonl.gz', maxlen=21, formatter=None,
+                 **kwargs):
         self.status = {}
         TrainingLogBase.__init__(self)
-        kwargs.setdefault("maxlen", 21)
-        kwargs.setdefault("filename", filename)
-        kwargs.setdefault("formatter", None)
-        self.logger = PicklableLogger(**kwargs)
+        self.logger = PicklableLogger(
+            filename=filename, maxlen=maxlen, formatter=formatter, **kwargs)
         self.last_flushed = -1
         self.current_row_container = {}
 
