@@ -46,8 +46,11 @@ script:
   - export THEANO_FLAGS=floatX=$FLOATX,optimizer=fast_compile
   - export FUEL_FLOATX=$FLOATX
   - "if [[ $DB == 'sqlite' ]]; then echo 'log_backend: sqlite' > ~/.blocksrc; fi"
-  - "if [[ $DB == 'mimir' ]]; then echo 'log_backend: mimir' > ~/.blocksrc; fi"
-  - "if [[ $DB == 'mimir' ]]; then echo 'log_arguments: \n    maxlen: null' > ~/.blocksrc; fi"
+  - |
+      if [[ $DB == 'mimir' ]]; then
+        echo 'log_backend: mimir' > ~/.blocksrc;
+        echo 'log_arguments: \n    maxlen: null' >> ~/.blocksrc;
+      fi
   - # Running nose2 within coverage makes imports count towards coverage
   - function fail { export FAILED=1; }
   - |
