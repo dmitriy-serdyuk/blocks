@@ -68,26 +68,27 @@ class JSONLinesLog(TrainingLogBase):
             os.remove(filename)
         self.logger = PicklableLogger(
             filename=filename, maxlen=maxlen, formatter=formatter, **kwargs)
-        self.last_flushed = -1
+        self.last_flushed = None
         self.current_row_container = {}
 
     def flush(self):
         iterations_done = self.status['iterations_done']
-        if self.last_flushed > -1:
-            self.logger.log({'iterations_done': iterations_done,
-                             'reports': self.current_row_container})
+        self.logger.log({'iterations_done': iterations_done - 1,
+                         'reports': self.current_row_container})
         self.current_row_container = {}
         self.last_flushed = iterations_done
 
     def __getitem__(self, time):
         self._check_time(time)
         iterations_done = self.status.get('iterations_done', -1)
+        if self.last_flushed is None:
+            self.last_flushed = time
         if time > self.last_flushed:
             self.flush()
             return self.current_row_container
         elif time < iterations_done - 1:
             try:
-                return self.logger[time]['reports']
+                return self.logger[time - 1]['reports']
             except IndexError:
                 raise ValueError(
                     'cannot get past log entries for JSON log, max log length '
@@ -96,7 +97,7 @@ class JSONLinesLog(TrainingLogBase):
         elif time == iterations_done:
             return self.current_row_container
         else:
-            return self.logger[time]['reports']
+            return self.logger[time - 1]['reports']
 
     def __len__(self):
         # One more because of the current row which is not yet flushed
