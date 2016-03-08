@@ -63,7 +63,9 @@ class JSONLinesLog(TrainingLogBase):
 
     def flush(self):
         iterations_done = self.status['iterations_done']
-        self.logger.log({iterations_done: self.current_row_container})
+        if self.last_flushed > -1:
+            self.logger.log({'iterations_done': iterations_done,
+                             'reports': self.current_row_container})
         self.current_row_container = {}
         self.last_flushed = iterations_done
 
@@ -75,7 +77,7 @@ class JSONLinesLog(TrainingLogBase):
             return self.current_row_container
         elif time < iterations_done - 1:
             try:
-                return self.logger[iterations_done - time]
+                return self.logger[time]['reports']
             except IndexError:
                 raise ValueError(
                     'cannot get past log entries for JSON log, max log length '
@@ -84,7 +86,7 @@ class JSONLinesLog(TrainingLogBase):
         elif time == iterations_done:
             return self.current_row_container
         else:
-            return self.logger[iterations_done - time]
+            return self.logger[time]['reports']
 
     def __len__(self):
         return len(self.logger)
