@@ -43,13 +43,13 @@ class JSONLinesLog(TrainingLogBase):
     `jq <https://stedolan.github.io/jq/>`__
 
     .. code:: bash
-        gunzip -c log.jsonl.gz | jq '.[].train_error'
+        gunzip -c log.jsonl.gz | jq '.reports.train_error'
 
         # Or equivalently
-        zcat log.jsonl.gz | jq '.[].train_error'
+        zcat log.jsonl.gz | jq '.reports.train_error'
 
         # To filter out null entires
-        zcat log.jsnol.gz | jq '.[].train_error | select(.>0)'
+        zcat log.jsnol.gz | jq '.reports.train_error | select(.>0)'
 
     """
     def __init__(self, filename='log.jsonl.gz', maxlen=21, formatter=None,
