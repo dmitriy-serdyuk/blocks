@@ -1,3 +1,4 @@
+import os.path
 from mimir import Logger
 from mimir.logger import _Logger
 
@@ -13,7 +14,6 @@ class PicklableLogger(_Logger):
     def __init__(self, **kwargs):
         self.logger_kwargs = kwargs
         self.opened = False
-        if
 
     def open(self):
         if not self.opened:
@@ -64,6 +64,8 @@ class JSONLinesLog(TrainingLogBase):
                  **kwargs):
         self.status = {}
         TrainingLogBase.__init__(self)
+        if os.path.isfile(filename):
+            os.remove(filename)
         self.logger = PicklableLogger(
             filename=filename, maxlen=maxlen, formatter=formatter, **kwargs)
         self.last_flushed = -1
