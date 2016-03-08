@@ -99,7 +99,8 @@ class JSONLinesLog(TrainingLogBase):
             return self.logger[time]['reports']
 
     def __len__(self):
-        return len(self.logger)
+        # One more because of the current row which is not yet flushed
+        return len(self.logger) + 1
 
     def __setitem__(self, time, value):
         raise ValueError('cannot manually change JSON Lines log')
