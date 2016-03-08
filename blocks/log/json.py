@@ -13,6 +13,7 @@ class PicklableLogger(_Logger):
     def __init__(self, **kwargs):
         self.logger_kwargs = kwargs
         self.opened = False
+        if
 
     def open(self):
         if not self.opened:
@@ -50,6 +51,13 @@ class JSONLinesLog(TrainingLogBase):
 
         # To filter out null entires
         zcat log.jsnol.gz | jq '.reports.train_error | select(.>0)'
+
+        # To extract minimal training error
+        gunzip -c log.jsonl.gz | jq -s '. | map(.reports.true_cost) | min'
+
+        # To include the iteration with minimal training error
+        gunzip -c log.jsonl.gz | jq -s '. |
+            map([.iterations_done, .reports.true_cost]) | min_by(.[1])'
 
     """
     def __init__(self, filename='log.jsonl.gz', maxlen=21, formatter=None,
