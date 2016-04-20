@@ -1,5 +1,6 @@
 import os.path
 from collections import deque
+from six.moves import range
 from mimir import Logger
 from mimir.logger import _Logger
 
@@ -80,13 +81,15 @@ class JSONLinesLog(TrainingLogBase):
         self._check_time(time)
         iterations_done = self.status.get('iterations_done', -1)
 
-        # Flush local cache if needed
-        if len(self.local_cache) > 1:
+        # Flush local cache
+        while len(self.local_cache) > 1:
             self.flush(iterations_done - 1)
 
-        if time >= len(self.logger) + len(self.local_cache):
+        total_length = len(self.logger) + len(self.local_cache)
+        if time >= total_length:
             # Need to create new item in local cache
-            self.local_cache.append({})
+            self.local_cache.extend(
+                [{} for _ in range(time - total_length + 1)])
         last_logged_element = len(self.logger)
         if time < last_logged_element:
             try:
