@@ -83,7 +83,7 @@ class JSONLinesLog(TrainingLogBase):
 
         # Flush local cache
         while len(self.local_cache) > 1:
-            self.flush(iterations_done - 1)
+            self.flush(iterations_done - len(self.local_cache))
 
         total_length = len(self.logger) + len(self.local_cache)
         if time >= total_length:
