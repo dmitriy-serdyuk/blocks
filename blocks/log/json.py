@@ -61,7 +61,7 @@ class JSONLinesLog(TrainingLogBase):
             map([.iterations_done, .reports.true_cost]) | min_by(.[1])'
 
     """
-    def __init__(self, filename='log.jsonl.gz', maxlen=21, formatter=None,
+    def __init__(self, filename='log.jsonl.gz', maxlen=101, formatter=None,
                  **kwargs):
         self.status = {}
         TrainingLogBase.__init__(self)
