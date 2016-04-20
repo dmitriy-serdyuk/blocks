@@ -1,4 +1,5 @@
 import os.path
+from collections import deque
 from mimir import Logger
 from mimir.logger import _Logger
 
@@ -68,36 +69,35 @@ class JSONLinesLog(TrainingLogBase):
             os.remove(filename)
         self.logger = PicklableLogger(
             filename=filename, maxlen=maxlen, formatter=formatter, **kwargs)
-        self.last_flushed = None
-        self.current_row_container = {}
+        self.local_cache = deque()
 
-    def flush(self):
-        iterations_done = self.status['iterations_done']
-        self.logger.log({'iterations_done': iterations_done - 1,
-                         'reports': self.current_row_container})
-        self.current_row_container = {}
-        self.last_flushed = iterations_done
+    def flush(self, iterations_done):
+        if len(self.local_cache) > 0:
+            self.logger.log({'iterations_done': iterations_done,
+                             'reports': self.local_cache.popleft()})
 
     def __getitem__(self, time):
         self._check_time(time)
         iterations_done = self.status.get('iterations_done', -1)
-        if self.last_flushed is None:
-            self.last_flushed = time
-        if time > self.last_flushed:
-            self.flush()
-            return self.current_row_container
-        elif time < iterations_done - 1:
+
+        # Flush local cache if needed
+        if len(self.local_cache) > 1:
+            self.flush(iterations_done - 1)
+
+        if time >= len(self.logger) + len(self.local_cache):
+            # Need to create new item in local cache
+            self.local_cache.append({})
+        last_logged_element = len(self.logger)
+        if time < last_logged_element:
             try:
-                return self.logger[time - 1]['reports']
+                return self.logger[time]['reports']
             except IndexError:
                 raise ValueError(
                     'cannot get past log entries for JSON log, max log length '
                     'in memory is: {}'.format(
                         self.logger.logger_kwargs['maxlen']))
-        elif time == iterations_done:
-            return self.current_row_container
-        else:
-            return self.logger[time - 1]['reports']
+        if time >= last_logged_element:
+            return self.local_cache[time - last_logged_element]
 
     def __len__(self):
         # One more because of the current row which is not yet flushed
@@ -110,4 +110,5 @@ class JSONLinesLog(TrainingLogBase):
         self.logger.open()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.flush(self.status.get('iterations_done', -1))
         self.logger.close()
