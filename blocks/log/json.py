@@ -65,7 +65,7 @@ class JSONLinesLog(TrainingLogBase):
     def __init__(self, filename='log.jsonl.gz', maxlen=101, formatter=None,
                  **kwargs):
         self.status = {}
-        TrainingLogBase.__init__(self)
+        super(JSONLinesLog, self).__init__()
         if os.path.isfile(filename):
             os.remove(filename)
         self.logger = PicklableLogger(
@@ -73,38 +73,47 @@ class JSONLinesLog(TrainingLogBase):
         self.local_cache = deque()
 
     def flush(self, iterations_done):
+        if iterations_done < 0:
+            raise ValueError
         if len(self.local_cache) > 0:
             self.logger.log({'iterations_done': iterations_done,
                              'reports': self.local_cache.popleft()})
 
     def __getitem__(self, time):
         self._check_time(time)
-        iterations_done = self.status.get('iterations_done', -1)
+        logger_len = self.inner_logger_len()
+        total_length = logger_len + len(self.local_cache)
 
         # Flush local cache
         while len(self.local_cache) > 1:
-            self.flush(iterations_done - len(self.local_cache) + 1)
+            self.flush(total_length - len(self.local_cache))
+        logger_len = self.inner_logger_len()
 
-        total_length = len(self.logger) + len(self.local_cache)
         if time >= total_length:
             # Need to create new item in local cache
             self.local_cache.extend(
                 [{} for _ in range(time - total_length + 1)])
-        last_logged_element = len(self.logger)
-        if time < last_logged_element:
+        if time < logger_len:
             try:
-                assert self.logger[time]['iterations_done'] == time
+                if not self.logger[time]['iterations_done'] == time:
+                    raise ValueError('iterations done')
                 return self.logger[time]['reports']
             except IndexError:
                 raise ValueError(
                     'cannot get past log entries for JSON log, max log length '
                     'in memory is: {}'.format(
                         self.logger.logger_kwargs['maxlen']))
-        if time >= last_logged_element:
-            return self.local_cache[time - last_logged_element]
+        if time >= logger_len:
+            return self.local_cache[time - logger_len]
+
+    def inner_logger_len(self):
+        try:
+            return len(self.logger)
+        except AttributeError:
+            return 0
 
     def __len__(self):
-        return len(self.logger) + len(self.local_cache)
+        return self.inner_logger_len() + len(self.local_cache)
 
     def __setitem__(self, time, value):
         raise ValueError('cannot manually change JSON Lines log')
@@ -115,3 +124,6 @@ class JSONLinesLog(TrainingLogBase):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.flush(self.status.get('iterations_done', -1))
         self.logger.close()
+
+    def __iter__(self):
+        return iter([self[i] for i in range(len(self))])
