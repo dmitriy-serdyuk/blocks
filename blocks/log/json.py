@@ -89,7 +89,7 @@ class JSONLinesLog(TrainingLogBase):
         if time >= total_length:
             # Need to create new item in local cache
             self.local_cache.extend(
-                [{} for _ in range(time - total_length + 1)])
+                [{} for _ in range(time - total_length)])
         last_logged_element = len(self.logger)
         if time < last_logged_element:
             try:
