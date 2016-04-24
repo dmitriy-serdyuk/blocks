@@ -89,10 +89,11 @@ class JSONLinesLog(TrainingLogBase):
         if time >= total_length:
             # Need to create new item in local cache
             self.local_cache.extend(
-                [{} for _ in range(time - total_length)])
+                [{} for _ in range(time - total_length + 1)])
         last_logged_element = len(self.logger)
         if time < last_logged_element:
             try:
+                assert self.logger[time]['iterations_done'] == time
                 return self.logger[time]['reports']
             except IndexError:
                 raise ValueError(
@@ -103,8 +104,7 @@ class JSONLinesLog(TrainingLogBase):
             return self.local_cache[time - last_logged_element]
 
     def __len__(self):
-        # One more because of the current row which is not yet flushed
-        return len(self.logger) + 1
+        return len(self.logger) + len(self.local_cache)
 
     def __setitem__(self, time, value):
         raise ValueError('cannot manually change JSON Lines log')
