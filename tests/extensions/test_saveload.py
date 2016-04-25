@@ -52,8 +52,9 @@ class TestCheckpoint(unittest.TestCase):
             algorithm=self.algorithm,
             extensions=[Load('myweirdmodel.tar')]
         )
-        new_main_loop.extensions[0].main_loop = new_main_loop
-        new_main_loop._run_extensions('before_training')
+        with new_main_loop.log:
+            new_main_loop.extensions[0].main_loop = new_main_loop
+            new_main_loop._run_extensions('before_training')
         assert_allclose(self.W.get_value(), old_value)
 
     def test_load_log_and_iteration_state(self):
@@ -66,8 +67,9 @@ class TestCheckpoint(unittest.TestCase):
             algorithm=self.algorithm,
             extensions=[Load('myweirdmodel.tar', True, True)]
         )
-        new_main_loop.extensions[0].main_loop = new_main_loop
-        new_main_loop._run_extensions('before_training')
+        with new_main_loop.log:
+            new_main_loop.extensions[0].main_loop = new_main_loop
+            new_main_loop._run_extensions('before_training')
         # Check the log
         new_keys = sorted(new_main_loop.log.status.keys())
         old_keys = sorted(self.main_loop.log.status.keys())
