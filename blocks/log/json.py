@@ -24,6 +24,10 @@ class PicklableLogger(_Logger):
             self.load(self.logger_kwargs['filename'])
             self.opened = True
 
+    def close(self):
+        self.opened = False
+        super(PicklableLogger, self).close()
+
     def __setstate__(self, state):
         self.logger_kwargs = state
         self.opened = False
