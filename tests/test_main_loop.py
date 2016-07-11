@@ -33,11 +33,12 @@ def test_main_loop():
     main_loop.run()
     assert_raises(AttributeError, getattr, main_loop, 'model')
 
-    assert main_loop.log.status['iterations_done'] == 20
-    assert main_loop.log.status['_epoch_ends'] == [10, 20]
-    assert len(main_loop.log) == 20
-    for i in range(20):
-        assert main_loop.log[i + 1]['batch'] == {'data': i % 10}
+    with main_loop.log.reader() as log:
+        assert log.status['iterations_done'] == 20
+        assert log.status['_epoch_ends'] == [10, 20]
+        assert len(log) == 20
+        for i in range(20):
+            assert log[i + 1]['batch'] == {'data': i % 10}
 
     config.profile = old_config_profile_value
 
@@ -50,7 +51,8 @@ def test_training_resumption():
             extensions=[WriteBatchExtension(),
                         FinishAfter(after_n_batches=14)])
         main_loop.run()
-        assert main_loop.log.status['iterations_done'] == 14
+        with main_loop.log.reader() as log:
+            assert log.status['iterations_done'] == 14
 
         if with_serialization:
             main_loop = cPickle.loads(cPickle.dumps(main_loop))
@@ -62,10 +64,11 @@ def test_training_resumption():
             ["after_batch"],
             predicate=lambda log: log.status['iterations_done'] == 27)
         main_loop.run()
-        assert main_loop.log.status['iterations_done'] == 27
-        assert main_loop.log.status['epochs_done'] == 2
+        with main_loop.log.reader() as log:
+            assert log.status['iterations_done'] == 27
+            assert log.status['epochs_done'] == 2
         for i in range(27):
-            assert main_loop.log[i + 1]['batch'] == {"data": i % 10}
+            assert log[i + 1]['batch'] == {"data": i % 10}
 
     do_test(False)
     do_test(True)
