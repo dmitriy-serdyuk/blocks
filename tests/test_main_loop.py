@@ -10,6 +10,7 @@ from numpy.testing import assert_raises
 from six.moves import cPickle
 
 from blocks.main_loop import MainLoop
+from blocks.log import TrainingLog
 from blocks.extensions import TrainingExtension, FinishAfter, Printing
 from blocks.utils import unpack
 from blocks.config import config
@@ -72,6 +73,19 @@ def test_training_resumption():
 
     do_test(False)
     do_test(True)
+
+
+def test_new_iteration_call():
+    data_stream = IterableDataset(range(10)).get_example_stream()
+    log = TrainingLog()
+
+    log.new_iteration = MagicMock()
+    main_loop = MainLoop(
+        MockAlgorithm(), data_stream, log=log,
+        extensions=[FinishAfter(after_n_epochs=1)])
+    main_loop.run()
+
+    assert log.new_iteration.call_args_list == [()]*11
 
 
 def test_training_interrupt():
