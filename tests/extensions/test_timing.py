@@ -1,4 +1,4 @@
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_raises
 
 from blocks.extensions import Timing, FinishAfter
 from blocks.utils.testing import MockMainLoop
@@ -20,3 +20,12 @@ def test_timing():
         atol=1e-2)
     assert 'each_time_read_data_this_epoch' in main_loop.log[iterations]
     assert 'each_second_time_read_data_this_epoch' in main_loop.log[iterations]
+
+
+def test_timing_rises():
+    epochs = 2
+    main_loop = MockMainLoop(delay_time=0.1,
+                             extensions=[Timing(before_training=True),
+                                         FinishAfter(after_n_epochs=epochs)])
+    assert_raises(ValueError, main_loop.run)
+
